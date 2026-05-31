@@ -1,0 +1,60 @@
+# FastAPI Backend Requirements
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+# Database
+sqlalchemy
+psycopg2-binary  # PostgreSQL adapter
+# or use this for MySQL: mysqlclient==2.2.0
+
+# Authentication & Security
+python-jose[cryptography]
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.1
+pydantic-settings
+
+# Data Validation & Serialization
+marshmallow
+python-multipart
+
+# API Documentation
+python-multipart
+
+# Testing
+pytest
+pytest-cov
+pytest-asyncio
+httpx
+
+# Code Quality
+black
+flake8
+isort
+pylint
+
+# Logging & Monitoring
+python-json-logger
+
+# File Uploads
+python-multipart
+
+# Email
+python-multipart
+
+# Image Processing (for property photos)
+Pillow
+
+# Async Support
+aiofiles
+
+# CORS Support
+fastapi-cors
+
+# Rate Limiting
+slowapi
+
+# Development
+ipython
