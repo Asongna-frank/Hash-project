@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import Base, engine
-from app.routers import auth, hospitals
+from app.routers import auth, hospitals, patients, chat
 
 # Create FastAPI app
 app = FastAPI(
@@ -42,3 +42,5 @@ def root():
 app.include_router(auth.router)
 app.include_router(hospitals.router)
 
+app.include_router(patients.router, prefix="/patients", tags=["patients"])
+app.include_router(chat.router, prefix="/chat", tags=["chat"])

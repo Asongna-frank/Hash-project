@@ -17,6 +17,12 @@ from app.utils.auth import (
 )
 from app.utils.pregnancy import compute_lmp_and_edd
 
+from datetime import datetime, timezone, date as date_type
+from app.models.pregnancy import Pregnancy
+from app.models.risk_assessment import RiskAssessment
+from app.services.risk_scoring import compute_risk_level
+from app.schemas.patient import PatientCreate, PatientResponse
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -93,57 +99,103 @@ def hospital_login(
 
 
 @router.post("/patient/signup", response_model=PatientResponse, status_code=201)
-def patient_signup(
-    patient_data: PatientCreate,
-    db: Session = Depends(get_db),
-):
-    """Register a new patient account."""
-    # Validate hospital_id exists
-    hospital = db.query(Hospital).filter(Hospital.id == patient_data.hospital_id).first()
+def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
+
+    # 1. Validate hospital exists
+    hospital = db.query(Hospital).filter(Hospital.id == body.hospital_id).first()
     if not hospital:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Hospital not found",
-        )
+        raise HTTPException(status_code=404, detail="Hospital not found")
 
-    # Check if phone already exists in patients table
-    existing_patient = db.query(Patient).filter(Patient.phone == patient_data.phone).first()
-    if existing_patient:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Phone number already registered",
-        )
+    # 2. Check duplicate phone
+    existing = db.query(Patient).filter(Patient.phone == body.phone).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Phone number already registered")
 
-    # Compute LMP and EDD from weeks pregnant at signup
-    lmp, edd = compute_lmp_and_edd(patient_data.weeks_pregnant_at_signup)
+    # 3. Compute LMP and EDD
+    from app.utils.pregnancy import compute_lmp_and_edd
+    lmp, edd = compute_lmp_and_edd(body.weeks_pregnant_at_signup)
 
-    # Hash password and create patient record
-    try:
-        hashed_password = hash_password(patient_data.password)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
+    # 4. Hash password
+    from app.utils.auth import hash_password
+    hashed = hash_password(body.password)
 
+    # 5. Create patient record
     patient = Patient(
-        name=patient_data.name,
-        phone=patient_data.phone,
-        hashed_password=hashed_password,
-        hospital_id=patient_data.hospital_id,
-        weeks_pregnant_at_signup=patient_data.weeks_pregnant_at_signup,
+        name=body.name,
+        phone=body.phone,
+        hashed_password=hashed,
+        hospital_id=body.hospital_id,
+        weeks_pregnant_at_signup=body.weeks_pregnant_at_signup,
         lmp=lmp,
         edd=edd,
+        age=body.age,
+        parity=body.parity,
+        language=body.language,
+        preferred_support=body.preferred_support,
+        previous_loss=body.previous_loss,
+        previous_stillbirth=body.previous_stillbirth,
+        previous_caesarean=body.previous_caesarean,
+        previous_preeclampsia=body.previous_preeclampsia,
+        has_hypertension=body.has_hypertension,
+        has_diabetes=body.has_diabetes,
+        has_sickle_cell=body.has_sickle_cell,
+        has_hiv=body.has_hiv,
+        has_severe_anaemia=body.has_severe_anaemia,
+        multiple_pregnancy=body.multiple_pregnancy,
+        late_anc_initiation=body.late_anc_initiation,
+        no_prior_anc=body.no_prior_anc,
         account_type="smartphone",
-        history_of_pregnancy_loss=patient_data.history_of_pregnancy_loss,
-        history_of_smoking=patient_data.history_of_smoking,
-        known_chronic_conditions=patient_data.known_chronic_conditions,
+        status="active",
     )
-
     db.add(patient)
+    db.flush()  # get patient.id without committing
+
+    # 6. Compute risk level
+    answers = {
+        "age_outside_range":     body.age <= 17 or body.age >= 35,
+        "previous_loss":         body.previous_loss,
+        "previous_stillbirth":   body.previous_stillbirth,
+        "previous_caesarean":    body.previous_caesarean,
+        "previous_preeclampsia": body.previous_preeclampsia,
+        "has_hypertension":      body.has_hypertension,
+        "has_diabetes":          body.has_diabetes,
+        "has_sickle_cell":       body.has_sickle_cell,
+        "has_hiv":               body.has_hiv,
+        "has_severe_anaemia":    body.has_severe_anaemia,
+        "multiple_pregnancy":    body.multiple_pregnancy,
+        "late_anc_initiation":   body.late_anc_initiation,
+        "no_prior_anc":          body.no_prior_anc,
+    }
+    level, score, rubric_version = compute_risk_level(answers)
+
+    patient.risk_level = level
+    patient.risk_level_set_at = datetime.now(timezone.utc)
+    patient.risk_level_set_by = "system"
+
+    # 7. Write RiskAssessment audit record
+    risk_record = RiskAssessment(
+        patient_id=patient.id,
+        computed_by="system",
+        inputs=answers,
+        rubric_version=rubric_version,
+        result_level=level,
+        score=score,
+    )
+    db.add(risk_record)
+
+    # 8. Create initial Pregnancy record
+    pregnancy = Pregnancy(
+        patient_id=patient.id,
+        lmp=lmp,
+        edd=edd,
+        outcome="ongoing",
+        routine_paused=False,
+    )
+    db.add(pregnancy)
+
+    # 9. Commit everything in one transaction
     db.commit()
     db.refresh(patient)
-
     return patient
 
 
