@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import Base, engine
 from app.routers import auth, hospitals, patients, chat
+from app.models import message  # noqa — ensures table is registered with Base
 
 # Create FastAPI app
 app = FastAPI(

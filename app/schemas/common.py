@@ -23,8 +23,8 @@ class ChatMessageRequest(BaseModel):
 
 class ChatMessageResponse(BaseModel):
     reply: str
+    triage_level: str           # "low" | "medium" | "high"
     loss_detected: bool = False
-    acuity: str | None = None  # placeholder for M4 triage
 
 
 class RiskOverrideRequest(BaseModel):

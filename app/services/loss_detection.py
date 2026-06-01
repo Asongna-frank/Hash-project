@@ -36,6 +36,7 @@ def detect_loss(message: str) -> str:
         result = llm_service.classify_message(
             message=message,
             system_prompt=LOSS_DETECTION_SYSTEM_PROMPT,
+            max_tokens=10,
         )
         result_upper = result.strip().upper()
 

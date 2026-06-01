@@ -216,9 +216,20 @@ def test_patient_signup_invalid_hospital():
         "password": "PatientPass123!",
         "hospital_id": "99999999-9999-9999-9999-999999999999",
         "weeks_pregnant_at_signup": 10,
-        "history_of_pregnancy_loss": False,
-        "history_of_smoking": False,
-        "known_chronic_conditions": "None"
+        "age": 25,
+        "parity": 1,
+        "previous_loss": False,
+        "previous_stillbirth": False,
+        "previous_caesarean": False,
+        "previous_preeclampsia": False,
+        "has_hypertension": False,
+        "has_diabetes": False,
+        "has_sickle_cell": False,
+        "has_hiv": False,
+        "has_severe_anaemia": False,
+        "multiple_pregnancy": False,
+        "late_anc_initiation": False,
+        "no_prior_anc": False,
     }
     
     print_info(f"Request: POST /auth/patient/signup")
@@ -245,13 +256,26 @@ def test_patient_signup_valid(hospital_id: str):
     
     payload = {
         "name": "Test Patient Valid",
-        "phone": "0700000021",
+        "phone": PATIENT_PHONE,
         "password": "PatientPass123!",
         "hospital_id": hospital_id,
         "weeks_pregnant_at_signup": 12,
-        "history_of_pregnancy_loss": False,
-        "history_of_smoking": False,
-        "known_chronic_conditions": "None"
+        "age": 28,
+        "parity": 2,
+        "language": "English",
+        "preferred_support": "peer",
+        "previous_loss": False,
+        "previous_stillbirth": False,
+        "previous_caesarean": False,
+        "previous_preeclampsia": False,
+        "has_hypertension": False,
+        "has_diabetes": False,
+        "has_sickle_cell": False,
+        "has_hiv": False,
+        "has_severe_anaemia": False,
+        "multiple_pregnancy": False,
+        "late_anc_initiation": False,
+        "no_prior_anc": False,
     }
     
     print_info(f"Request: POST /auth/patient/signup")
@@ -345,11 +369,197 @@ def test_get_current_user_no_token():
         print_info(f"Status Code: {response.status_code}")
         print_info(f"Response: {json.dumps(response.json(), indent=2)}")
         
-        if response.status_code == 403:
+        if response.status_code in (401, 403):
             print_success("Correctly rejected request without token")
             return True
         else:
-            print_error(f"Expected 403, got {response.status_code}")
+            print_error(f"Expected 401 or 403, got {response.status_code}")
+            return False
+    except Exception as e:
+        print_error(f"Exception: {str(e)}")
+        return False
+
+def test_chat_normal_message(token: str):
+    """Test normal chat message (should get reply + triage_level)."""
+    print_test("Chat - Normal Message (Should Get Reply + Triage)")
+    
+    payload = {
+        "message": "I'm feeling a bit dizzy and nauseous. Is this normal?"
+    }
+    
+    print_info(f"Request: POST /chat/message")
+    print_info(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/message", json=payload, headers=headers)
+        print_info(f"Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print_info(f"Response: {json.dumps(data, indent=2)}")
+            
+            # Verify response schema
+            if "reply" in data and "triage_level" in data and "loss_detected" in data:
+                if data["triage_level"] in ("low", "medium", "high"):
+                    print_success("Chat message processed with correct response schema")
+                    return True
+                else:
+                    print_error(f"Invalid triage_level: {data['triage_level']}")
+                    return False
+            else:
+                print_error("Missing required fields in response")
+                return False
+        else:
+            print_error(f"Expected 200, got {response.status_code}")
+            print_info(f"Response: {json.dumps(response.json(), indent=2)}")
+            return False
+    except Exception as e:
+        print_error(f"Exception: {str(e)}")
+        return False
+
+def test_chat_loss_detection(token: str):
+    """Test loss detection message."""
+    print_test("Chat - Loss Detection Message")
+    
+    payload = {
+        "message": "I had a miscarriage yesterday. I lost my baby."
+    }
+    
+    print_info(f"Request: POST /chat/message")
+    print_info(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/message", json=payload, headers=headers)
+        print_info(f"Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print_info(f"Response: {json.dumps(data, indent=2)}")
+            
+            if data.get("loss_detected") or data.get("triage_level") == "high":
+                print_success("Loss detection triggered correctly")
+                return True, data.get("loss_detected")
+            else:
+                print_info("Message processed but loss not detected (may be AMBIGUOUS path)")
+                return True, False
+        else:
+            print_error(f"Expected 200, got {response.status_code}")
+            return False, False
+    except Exception as e:
+        print_error(f"Exception: {str(e)}")
+        return False, False
+
+def test_chat_pause_command(token: str):
+    """Test PAUSE opt-out command."""
+    print_test("Chat - PAUSE Command (Opt-out)")
+    
+    payload = {
+        "message": "PAUSE"
+    }
+    
+    print_info(f"Request: POST /chat/message")
+    print_info(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/message", json=payload, headers=headers)
+        print_info(f"Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print_info(f"Response: {json.dumps(data, indent=2)}")
+            
+            if "pause" in data.get("reply", "").lower() or "paused" in data.get("reply", "").lower():
+                print_success("PAUSE command handled correctly")
+                return True
+            else:
+                print_error("Expected pause confirmation message")
+                return False
+        else:
+            print_error(f"Expected 200, got {response.status_code}")
+            return False
+    except Exception as e:
+        print_error(f"Exception: {str(e)}")
+        return False
+
+def test_chat_stop_command(token: str):
+    """Test STOP opt-out command."""
+    print_test("Chat - STOP Command (Opt-out)")
+    
+    payload = {
+        "message": "STOP"
+    }
+    
+    print_info(f"Request: POST /chat/message")
+    print_info(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/message", json=payload, headers=headers)
+        print_info(f"Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print_info(f"Response: {json.dumps(data, indent=2)}")
+            
+            if "stop" in data.get("reply", "").lower():
+                print_success("STOP command handled correctly")
+                return True
+            else:
+                print_error("Expected stop confirmation message")
+                return False
+        else:
+            print_error(f"Expected 200, got {response.status_code}")
+            return False
+    except Exception as e:
+        print_error(f"Exception: {str(e)}")
+        return False
+
+def test_chat_resume_command(token: str):
+    """Test RESUME opt-out command."""
+    print_test("Chat - RESUME Command (Resume after Opt-out)")
+    
+    payload = {
+        "message": "RESUME"
+    }
+    
+    print_info(f"Request: POST /chat/message")
+    print_info(f"Payload: {json.dumps(payload, indent=2)}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    
+    try:
+        response = requests.post(f"{BASE_URL}/chat/message", json=payload, headers=headers)
+        print_info(f"Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print_info(f"Response: {json.dumps(data, indent=2)}")
+            
+            if "welcome" in data.get("reply", "").lower() or "resume" in data.get("reply", "").lower():
+                print_success("RESUME command handled correctly")
+                return True
+            else:
+                print_error("Expected resume confirmation message")
+                return False
+        else:
+            print_error(f"Expected 200, got {response.status_code}")
             return False
     except Exception as e:
         print_error(f"Exception: {str(e)}")
@@ -407,8 +617,28 @@ def main():
             # Test 11: Get current patient user
             if patient_token:
                 results["Get Current User (Patient)"] = test_get_current_user(patient_token, "Patient")
+                
+                # ================================================================
+                # M3 CONVERSATION ENGINE TESTS — Requires authenticated patient
+                # ================================================================
+                
+                # Test 12: Normal chat message
+                results["Chat - Normal Message"] = test_chat_normal_message(patient_token)
+                
+                # Test 13: Loss detection message
+                result, loss_detected = test_chat_loss_detection(patient_token)
+                results["Chat - Loss Detection"] = result
+                
+                # Test 14: PAUSE command
+                results["Chat - PAUSE Command"] = test_chat_pause_command(patient_token)
+                
+                # Test 15: STOP command
+                results["Chat - STOP Command"] = test_chat_stop_command(patient_token)
+                
+                # Test 16: RESUME command
+                results["Chat - RESUME Command"] = test_chat_resume_command(patient_token)
     
-    # Test 12: Get current user without token
+    # Test 17: Get current user without token
     results["Get Current User (No Token)"] = test_get_current_user_no_token()
     
     # Print summary

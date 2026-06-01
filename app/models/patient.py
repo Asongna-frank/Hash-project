@@ -68,8 +68,16 @@ class Patient(Base):
     status = Column(String, default="active")  # active|post_loss|delivered
     pending_loss_confirmation = Column(Boolean, default=False)  # True while awaiting chat confirmation
 
+    # Opt-out status
+    opt_out_status = Column(String, nullable=True)
+    # null = receiving messages | "paused" = silenced for 7 days | "stopped" = indefinitely silenced
+
+    paused_until = Column(DateTime(timezone=True), nullable=True)
+    # set when patient sends PAUSE, cleared when STOP or RESUME received
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=None, nullable=False, default=datetime.utcnow)
 
     # Relationships
     pregnancies = relationship("Pregnancy", back_populates="patient")
+    messages = relationship("Message", back_populates="patient")
