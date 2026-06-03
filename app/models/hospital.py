@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Column, DateTime, Float, String, UUID
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
@@ -32,3 +33,6 @@ class Hospital(Base):
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=None, nullable=False, default=datetime.utcnow)
+
+    # Relationships
+    appointments = relationship("Appointment", back_populates="hospital")

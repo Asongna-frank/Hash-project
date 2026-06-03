@@ -81,3 +81,4 @@ class Patient(Base):
     # Relationships
     pregnancies = relationship("Pregnancy", back_populates="patient")
     messages = relationship("Message", back_populates="patient")
+    appointments = relationship("Appointment", back_populates="patient")

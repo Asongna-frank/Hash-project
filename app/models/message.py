@@ -1,7 +1,7 @@
 """Message model — stores all inbound and outbound chat messages."""
 
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -34,6 +34,10 @@ class Message(Base):
     # "low" | "medium" | "high" for inbound messages
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    is_read = Column(Boolean, default=False, nullable=False)
+    # False = unread notification | True = acknowledged by patient
+    # Only meaningful for direction="out" reminder/checkin/crisis messages
 
     # Relationships
     patient = relationship("Patient", back_populates="messages")

@@ -9,7 +9,7 @@ class BaseLLMService(ABC):
     """Abstract base class for LLM providers."""
 
     @abstractmethod
-    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500) -> str:
+    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500, temperature: float = 0.0) -> str:
         """
         Send a message to the LLM with a system prompt.
         Returns the model's text response as a plain string.
@@ -25,11 +25,11 @@ class GroqLLMService(BaseLLMService):
         self.client = Groq(api_key=settings.GROQ_API_KEY)
         self.model = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500) -> str:
+    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500, temperature: float = 0.0) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=max_tokens,
-            temperature=0.0,
+            temperature=temperature,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
@@ -55,11 +55,12 @@ class BedrockLLMService(BaseLLMService):
         )
         self.model_id = "anthropic.claude-3-haiku-20240307-v1:0"
 
-    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500) -> str:
+    def classify_message(self, message: str, system_prompt: str, max_tokens: int = 500, temperature: float = 0.0) -> str:
         import json
         body = json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
+            "temperature": temperature,
             "system": system_prompt,
             "messages": [{"role": "user", "content": message}],
         })

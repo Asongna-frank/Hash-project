@@ -1,368 +1,589 @@
 # HASH Project — Full Context for AI Assistants
 
-> Read this file before writing any code.
-> Reference it in every Copilot Agent prompt.
-> Update at the end of every sprint.
+> **How to use this file:** Drop it in the root of the project directory.
+> Reference it in every Copilot Agent prompt with:
+> "Read HASH_PROJECT_CONTEXT.md before writing any code."
+> Update this file at the end of every sprint.
 
 ---
 
 ## 1. What HASH Is
 
 HASH is a maternal care and early pregnancy loss support platform for
-sub-Saharan African healthcare settings. An AI chatbot supports pregnant women
-and women recovering from pregnancy loss. Hospitals monitor patients via a
-clinical dashboard.
+sub-Saharan African healthcare settings. It connects pregnant women with their
+assigned hospitals through an AI chatbot and a clinical dashboard.
 
-Two patient tracks — both first-class:
-- **Smartphone** — mobile/web app: chat, tips, EDD countdown, emergency button
-- **Choronko (GSM/SMS)** — feature phone only, full care over SMS
+Two patient populations:
+- **Smartphone patients** — mobile/web app: chat, tips, EDD countdown, emergency GPS button.
+- **Choronko (GSM/SMS) patients** — feature phone only. Clinician registers them
+  at the hospital using phone number as sole identifier. Full care delivered via SMS.
+
+Neither track is second-class. Every feature must work on both. All content
+needs a full form (in-app) and an SMS-safe short form.
 
 ---
 
-## 2. Two Core Concepts — Never Conflate
+## 2. The Two Core Concepts — Never Conflate
 
 ### Patient Risk Level
-Computed automatically at signup from weighted questionnaire (Low/Medium/High).
-Controls proactive check-in frequency. Clinician can override. Always logged.
+Computed automatically at signup from weighted questionnaire answers.
+Controls proactive check-in frequency:
+- **High** → daily
+- **Medium** → weekly
+- **Low** → fortnightly + gestational milestones
+
+Can be manually overridden by a clinician. Changes logged. Takes effect within
+5 minutes. Stored on the patient record with full audit trail.
 
 ### Message Acuity
-Assigned per message in real time (Low/Medium/High).
-Controls bot reply and whether to alert hospital.
-Does NOT change patient risk level. Independent.
+Assigned in real time to every individual message the patient sends
+(Low / Medium / High). Controls bot response and whether to alert the hospital.
+Does NOT change the patient's risk level. Computed by M4 triage engine.
+
+**These are completely independent.** Never merge them in code or naming.
 
 ---
 
-## 3. Tech Stack
+## 3. Technology Stack
 
-| Layer | Tool | Notes |
+| Layer | Technology | Notes |
 |---|---|---|
-| Backend | FastAPI | Running locally |
-| Database | PostgreSQL via Supabase | Tables created via SQLAlchemy metadata, no Alembic |
-| ORM | SQLAlchemy | |
-| Auth | python-jose + passlib bcrypt | |
-| LLM (dev) | Groq API — llama3-8b-8192 | |
-| LLM (prod) | Amazon Bedrock | Future — swap via LLM_PROVIDER env var |
-| Scheduler (dev) | APScheduler inside FastAPI | |
-| Scheduler (prod) | EventBridge + Lambda | Same logic, different trigger |
+| Backend framework | FastAPI (Python) | Currently in development on local PC |
+| Database | PostgreSQL via Supabase | Already set up and in use |
+| ORM | SQLAlchemy | With Alembic for migrations |
+| Auth | python-jose (JWT) + passlib (bcrypt) | Implemented in M1 |
+| LLM (local dev) | Groq API | Free, fast. Model: llama3-8b-8192 |
+| LLM (production) | Amazon Bedrock | Future — when AWS is set up |
+| NLP assist (future) | Amazon Comprehend | Future — keyword layer covers MVP |
+| SMS (choronko) | Queen SMS | **In use now.** Cameroon provider. `QUEEN_SMS_API_KEY` in `.env` |
+| Push notifications | In-app message + poll flag | MVP: in-chat message + `is_read` poll flag. FCM is Phase 2 |
+| Notifications (future cloud) | Amazon SNS / SES | Future — push + email when AWS is set up |
+| Infrastructure | AWS (future) | ECS Fargate, Aurora, Redis, S3, SNS, SES |
+| CI/CD | GitHub Actions + AWS CodeBuild | Future |
 
-### Environment Variables
+### LLM Provider Abstraction (critical design rule)
+All LLM calls go through a single `LLMService` interface in
+`app/services/llm_service.py`. The active provider is controlled by
+`LLM_PROVIDER` in `.env`. Setting `LLM_PROVIDER=bedrock` in production is
+the only change needed to switch from Groq to AWS — no endpoint code changes.
+
+### Environment Variables (`.env` in project root — never commit)
 ```
-DATABASE_URL=
-SECRET_KEY=
+DATABASE_URL=<supabase postgresql connection string>
+SECRET_KEY=<jwt signing secret>
 ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=
+ACCESS_TOKEN_EXPIRE_MINUTES=<integer>
+
+# LLM provider — "groq" for local dev, "bedrock" for production
 LLM_PROVIDER=groq
-GROQ_API_KEY=
+GROQ_API_KEY=<your groq api key>
+
+# SMS provider — Queen SMS (Cameroon). In use now for the choronko track.
+QUEEN_SMS_API_KEY=<your queen sms api key>
+QUEEN_SMS_SENDER_ID=HASH          # max 11 chars, shown as the SMS sender name
+QUEEN_SMS_BASE_URL=https://api.queensms.net/v1
+
+# Future — add when AWS is set up
+# AWS_REGION=us-east-1
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
 ```
 
-### LLM Abstraction Rule
-All LLM calls go through `app/services/llm_service.py` only.
-Never import Groq or boto3 directly in business logic files.
-Switching to Bedrock = change one .env variable. Zero code changes.
+### SMS Provider Abstraction (mirrors the LLM rule)
+All SMS sends go through a single `NotificationService` / `sms_service`
+interface in `app/services/sms_service.py`. The active provider is read from
+settings. Queen SMS is the only implementation for the MVP; swapping to SNS or
+Twilio later is one new subclass + one settings change — no caller code changes.
+Queen SMS endpoint: `POST {QUEEN_SMS_BASE_URL}/sms.php` with form fields
+`api_key`, `senderid`, `sms`, `mobiles` (comma-separated, "237" prefix optional).
+Success = JSON `responsecode == 1`. Never call `requests`/`httpx` to Queen SMS
+directly from a router or business-logic file — always via `sms_service`.
 
 ---
 
 ## 4. Completed Modules
 
 ### M1 — Identity & Onboarding ✅
+Two completely separate tables — `hospitals` and `patients`. No shared users
+table. No inheritance.
 
-**Two completely separate tables — no inheritance, no shared users table.**
+**Hospitals table:**
+id, name, phone (unique, login ID), hashed_password, gps_lat, gps_lng,
+address, personnel_name, personnel_contact, created_at
 
-`hospitals` — id, name, phone (unique login ID), hashed_password,
-gps_lat, gps_lng, address, created_at
+**Patients table:**
+id, name, phone (unique, login ID), hashed_password, created_at,
+hospital_id (FK → hospitals.id),
+weeks_pregnant_at_signup (int, 1–42),
+lmp (computed: today − weeks×7 days),
+edd (computed: lmp + 280 days),
+account_type (default "smartphone"),
+history_of_pregnancy_loss (bool, placeholder),
+history_of_smoking (bool, placeholder),
+known_chronic_conditions (str, placeholder)
 
-`patients` — id, name, phone (unique login ID), hashed_password,
-hospital_id (FK→hospitals), weeks_pregnant_at_signup, lmp, edd,
-account_type, age, parity, language, preferred_support,
-previous_loss, previous_stillbirth, previous_caesarean,
-previous_preeclampsia, has_hypertension, has_diabetes,
-has_sickle_cell, has_hiv, has_severe_anaemia, multiple_pregnancy,
-late_anc_initiation, no_prior_anc,
-risk_level, risk_level_set_at, risk_level_set_by,
-status (active|post_loss|delivered),
-pending_loss_confirmation, created_at
-
-**Endpoints:**
+**Endpoints completed:**
 - POST /auth/hospital/signup
-- POST /auth/hospital/login  → returns JWT
-- POST /auth/patient/signup  → computes lmp, edd, risk_level, creates Pregnancy record
-- POST /auth/patient/login   → returns JWT
+- POST /auth/hospital/login
+- POST /auth/patient/signup  ← computes and stores lmp + edd
+- POST /auth/patient/login
 - GET  /auth/me
-- GET  /hospitals            → public list for signup dropdown
+- GET  /hospitals  ← public list for signup dropdown
+
+**EDD utility:** `app/utils/pregnancy.py` → `compute_lmp_and_edd(weeks)`
 
 ### M2 — Patient & Pregnancy Profile ✅
+Real weighted questionnaire, system-computed baseline risk level at signup
+(config-driven rubric in `app/core/risk_config.py`), `pregnancies` and
+`risk_assessments` tables, clinician risk-level override (logged), and
+chat-message loss detection (keyword layer → Groq confirmation). See sections
+6–9 for the full schema and endpoints.
 
-**New tables created:**
+### M3 — Conversation Engine + Message Triage ✅
+Multi-turn chat pipeline (`app/routers/chat.py`), message store
+(`app/models/message.py`, `app/services/message_store.py` with
+`save_inbound` / `save_outbound`), per-message Low/Medium/High triage (M4 rules
+folded in), and risk-based proactive check-in cadence. The `messages` table and
+`save_outbound` helper are the delivery substrate that appointment reminders,
+daily tips, and check-ins all reuse — do not modify them.
 
-`pregnancies` — id, patient_id (FK), lmp, edd, outcome (ongoing|live_birth|loss),
-loss_date, ga_at_loss, routine_paused, created_at
+**Risk-based check-in cadence (fully implemented):**
+- High-risk → daily check-in (≥20 h interval)
+- Medium-risk → weekly (≥6.5 days)
+- Low-risk → fortnightly (≥13 days) + milestone week override (weeks 12/20/28/36 fire
+  an extra check-in if no check-in was sent in the last 7 days)
+- Post-loss patients use a separate grief-support prompt; never pregnancy content
+- Scheduler job fires daily at 08:00 UTC (09:00 Cameroon)
+- Delivery: SMS for choronko patients, in-app for smartphone patients
+- Skips: silenced (stopped/paused), pending_loss_confirmation, not-yet-due
 
-`risk_assessments` — id, patient_id (FK), computed_at, computed_by,
-inputs (JSONB), rubric_version, result_level, score
-
-**Risk scoring:** weighted questionnaire → total score → Low/Medium/High.
-Weights in `app/core/risk_config.py`. Every computation logged to risk_assessments.
-
-**Loss detection pipeline (from patient chat):**
-Layer 1: keyword match (free, instant)
-Layer 2: Groq classification → CONFIRMED | AMBIGUOUS | NOT_A_LOSS
-CONFIRMED → status="post_loss", pregnancy updated, risk→high, hospital alerted (TODO M6)
-
-**Endpoints:**
-- GET   /patients/{id}
-- GET   /patients/{id}/pregnancy
-- PATCH /patients/{id}/risk-level  (clinician only)
-- GET   /patients/{id}/risk-assessments
-- POST  /chat/message  (entry point — currently handles loss detection only)
-
-**Services:**
-- app/services/llm_service.py      — Groq/Bedrock abstraction
-- app/services/prompts.py          — all prompt strings + keyword lists
-- app/services/loss_detection.py   — two-layer pipeline
-- app/services/risk_scoring.py     — compute_risk_level()
-- app/core/risk_config.py          — weights, thresholds, rubric version
-
----
-
-## 5. Module Being Implemented Now
-
-### M3 — Conversation Engine (Phase 1: Chat + Triage)
-
-**Scope for this sprint:**
-- Conversation memory (short-term + patient context)
-- Single Groq call returns reply + triage_level together
-- Message logging (every inbound and outbound message stored)
-- PAUSE / STOP / RESUME keyword handling
-- Extend POST /chat/message with full pipeline
-
-**Tips and reminders are out of scope for this sprint.**
-**Personnel restructure is out of scope for this sprint.**
+**Key files:**
+- `app/services/checkin_generator.py` — LLM generation (temperature=0.7)
+- `app/services/checkin_sender.py` — idempotent delivery with interval logic
+- `app/services/prompts.py` — `CHECKIN_SYSTEM_PROMPT`, `POST_LOSS_CHECKIN_SYSTEM_PROMPT`
+- `test/test_checkins.py` — 30-assertion test suite (all passing)
 
 ---
 
-## 6. M3 Conversation Pipeline (full flow)
+## 5. Completed Sprint Features (beyond M1–M3 core)
 
-Every inbound patient message goes through these steps in order:
+### Appointment Reminders ✅ (part of M3 / appointment surface)
+
+An alarm-style reminder system. Four endpoints: create, list, soft-delete one,
+bulk soft-delete. Background scheduler (APScheduler, every 15 min) delivers
+24h and 2h reminders exactly once each via SMS (choronko) or in-app message
+(smartphone). 36-assertion test suite passing.
+
+### Notification Polling ✅
+`GET /notifications/unread` and `POST /notifications/acknowledge` let the
+Flutter app poll for unread out-bound messages (reminders, check-ins, tips)
+and clear the badge. Stands in for FCM push notifications (Phase 2).
+
+### Daily Personalized Tips ✅
+AI-generated health tip delivered once per day at 07:00 UTC (08:00 Cameroon).
+Personalized to gestational week, risk level, and all 12 clinical flags.
+Post-loss patients receive grief-support content instead of pregnancy tips.
+`GET /tips/today` endpoint returns today's tip (or `{"tip": null}`) for the
+Flutter home card and chat session bootstrap. 21-assertion test suite passing.
+
+Key files: `app/services/tip_generator.py`, `app/services/tip_sender.py`,
+`app/routers/tips.py`
+
+### Proactive Wellness Check-ins ✅
+Risk-based outbound check-ins at cadences defined by patient risk level:
+high → daily, medium → weekly, low → fortnightly + milestone week override.
+Post-loss patients get grief-focused check-ins. Scheduler fires 08:00 UTC
+(09:00 Cameroon). 30-assertion test suite passing.
+
+Key files: `app/services/checkin_generator.py`, `app/services/checkin_sender.py`
+
+---
+
+### Reference — M2 design (already implemented)
+
+M2 has four jobs:
+
+**Job 1 — Replace dummy signup questions with Dr Elvira's real questionnaire**
+The three placeholder columns in M1 become real weighted clinical questions.
+Each question has a point value. The system sums the points to get a risk score.
+
+**Job 2 — Compute baseline risk level automatically at signup**
+System-computed, not clinician-assessed. Formula:
+```
+score = sum of weights from questionnaire answers
+score 0–3  → "low"
+score 4–7  → "medium"
+score 8+   → "high"
+```
+Weights and thresholds live in a config dict (not hardcoded) so they can be
+tuned without a code change. Result stored on patient record. Full audit trail
+in risk_assessments table.
+
+Clinicians can still override the computed level from the dashboard.
+Every change (system or clinician) is logged in risk_assessments.
+
+**Job 3 — Detect pregnancy loss from patient chat messages**
+The patient reports a loss in the chat — the system detects it and acts.
+A clinician does NOT trigger this. The detection pipeline is:
 
 ```
-1. Save inbound message to messages table
-2. Check PAUSE / STOP / RESUME → if match, handle and return immediately
-3. Check patient.status == "post_loss" → route to post-loss handler (stub for now)
-4. Check patient.pending_loss_confirmation → handle ambiguous loss follow-up
-5. Run loss detection (keyword + Groq if needed)
-6. If NOT_A_LOSS → run main conversation pipeline:
-     a. Fetch last 10 messages from messages table (conversation memory)
-     b. Build patient context block from patients + pregnancies tables
-     c. Call Groq → returns {reply, triage_level} as JSON
-     d. Save outbound reply to messages table
-     e. Return {reply, triage_level} to patient
+Layer 1 — Keyword matching (runs first, no API cost)
+  → Scans message for known loss phrases
+  → If no keyword match → treat as normal message
+
+Layer 2 — LLM confirmation via Groq (runs only if Layer 1 fires)
+  → Single classification call with a strict prompt
+  → Returns: CONFIRMED | AMBIGUOUS | NOT_A_LOSS
+
+If CONFIRMED:
+  → Update patient status to "post_loss"
+  → Record loss_date and ga_at_loss on the Pregnancy record
+  → Stop all pregnancy reminders within 5 minutes (flag set in DB)
+  → Set risk_level to "high" (physical recovery period)
+  → Alert the hospital dashboard
+  → Trigger M9 post-loss care track (send opening message)
+  → Log to audit trail
+
+If AMBIGUOUS:
+  → Bot asks a gentle follow-up:
+    "I want to make sure I understand — are you telling me you've
+    experienced a pregnancy loss?"
+  → Store pending_loss_confirmation = true on patient record
+  → Wait for next message to re-evaluate
+
+If NOT_A_LOSS:
+  → Route through normal M4 triage pipeline
 ```
+
+**Job 4 — Keep gestational age current**
+`current_ga_weeks` is computed on the fly from stored `lmp`:
+```python
+current_ga_weeks = (date.today() - patient.lmp).days // 7
+```
+No scheduled job needed for MVP. Computed whenever needed.
 
 ---
 
-## 7. New Database Entity — `messages` Table
+## 6. New Database Entities for M2
 
-Every message in and out is stored here. This is the memory store.
+### `pregnancies` table
+Created automatically when a patient signs up. One pregnancy per patient for MVP.
+
+```
+id                UUID PK
+patient_id        UUID FK → patients.id
+lmp               DATE
+edd               DATE
+current_ga_weeks  INTEGER  (computed on read, not stored — or updated lazily)
+outcome           VARCHAR  "ongoing" | "live_birth" | "loss"
+loss_date         DATE     null unless outcome = "loss"
+ga_at_loss        INTEGER  null unless outcome = "loss"
+routine_paused    BOOLEAN  default False — True when loss detected, stops reminders
+created_at        TIMESTAMP WITH TZ
+```
+
+### `risk_assessments` table
+Audit trail for every risk level decision.
 
 ```
 id              UUID PK
 patient_id      UUID FK → patients.id
-direction       VARCHAR  "in" | "out"
-channel         VARCHAR  "app" | "sms"
-content         TEXT
-message_type    VARCHAR  "chat" | "checkin" | "tip" | "reminder" | "crisis"
-triage_level    VARCHAR  null for outbound | "low"|"medium"|"high" for inbound
-created_at      TIMESTAMP WITH TZ
+computed_at     TIMESTAMP WITH TZ
+computed_by     VARCHAR  "system" | clinician UUID
+inputs          JSONB    questionnaire answers or clinician reason
+rubric_version  VARCHAR  e.g. "v1.0"
+result_level    VARCHAR  "low" | "medium" | "high"
+score           INTEGER  raw point total (for system computations)
+```
+
+### `appointments` table (appointment reminders feature)
+One row per appointment a patient books. Soft delete only.
+
+```
+id                   UUID PK
+patient_id           UUID FK → patients.id
+hospital_id          UUID FK → hospitals.id   (taken from patient, not submitted)
+title                VARCHAR  e.g. "Antenatal check-up", "Scan"
+notes                TEXT     nullable
+appointment_datetime TIMESTAMP WITH TZ  must be in the future at creation
+reminder_24h_sent    BOOLEAN  default False
+reminder_2h_sent     BOOLEAN  default False
+is_deleted           BOOLEAN  default False — soft delete, keep for audit
+created_at           TIMESTAMP WITH TZ
+updated_at           TIMESTAMP WITH TZ
+```
+
+### `messages` table additions for notification polling
+The appointment feature relies on a read flag the app polls for the bell/banner:
+```
+message_type  VARCHAR   "reply" | "reminder" | "checkin" | "crisis"
+is_read       BOOLEAN   default False — only meaningful for direction="out"
+                        reminder/checkin/crisis messages; True once acknowledged
+```
+If `message_type` already exists from M3, reuse it; only add `is_read` if missing.
+
+### Updated `patients` table (M2 adds these columns)
+```
+-- Replace placeholder questions with real ones:
+age                       INTEGER      (moved to proper validated column)
+parity                    INTEGER      number of prior births
+previous_loss             BOOLEAN      default False
+previous_stillbirth       BOOLEAN      default False
+previous_caesarean        BOOLEAN      default False
+previous_preeclampsia     BOOLEAN      default False
+has_hypertension          BOOLEAN      default False
+has_diabetes              BOOLEAN      default False
+has_sickle_cell           BOOLEAN      default False
+has_hiv                   BOOLEAN      default False
+has_severe_anaemia        BOOLEAN      default False
+multiple_pregnancy        BOOLEAN      default False
+late_anc_initiation       BOOLEAN      default False
+no_prior_anc              BOOLEAN      default False
+
+-- Risk output (set by system at signup, overrideable by clinician):
+risk_level                VARCHAR      "low" | "medium" | "high"
+risk_level_set_at         TIMESTAMP WITH TZ
+risk_level_set_by         VARCHAR      "system" | clinician_id
+
+-- Status:
+status                    VARCHAR      "active" | "post_loss" | "delivered"
+pending_loss_confirmation BOOLEAN      default False
+
+-- Profile:
+language                  VARCHAR
+preferred_support         VARCHAR      "none" | "faith" | "peer" | "counsellor"
 ```
 
 ---
 
-## 8. Conversation Memory — How Context is Built
+## 7. Risk Scoring Config (tunable without code change)
 
-Before every Groq call, the system assembles a context package:
+Lives in `app/core/risk_config.py`. Dr Elvira adjusts values here.
 
-**Patient context block (from DB — static per request):**
-```
-Patient: {name}
-Gestational week: {current_ga_weeks}
-Risk level: {risk_level}
-Hospital: {hospital name}
-Status: {active | post_loss}
-Known conditions: {list of True flags from clinical profile}
-```
-
-**Conversation history (last 10 messages from messages table):**
-```
-Patient: {content}
-Bot: {content}
-Patient: {content}
-... (up to 10 messages, oldest first)
-```
-
-These two blocks are injected into the Groq system prompt on every call.
-current_ga_weeks is computed on the fly: `(date.today() - patient.lmp).days // 7`
-
----
-
-## 9. Single Groq Call — Reply + Triage Together
-
-One API call returns both the reply and the triage level.
-The prompt instructs Groq to return strict JSON.
-
-**System prompt structure:**
-```
-You are a warm, non-prescriptive maternal health assistant working in
-sub-Saharan Africa. You support pregnant women through their pregnancy
-and after pregnancy loss.
-
-Rules you must always follow:
-- Never prescribe medication or dosages
-- Never speculate about causes of symptoms
-- If the patient reports danger signs, tell her to go to hospital immediately
-- Keep replies short, warm, and plain — no medical jargon
-- Use the patient's name
-- Never use exclamation marks
-- Never use phrases like "everything happens for a reason"
-
-Triage rules:
-- high: heavy bleeding, severe pain, no fetal movement, severe headache,
-        blurred vision, fever, suicidal ideation, self-harm language
-- medium: mild pain, dizziness, nausea, worry, unusual but non-urgent symptoms
-- low: general questions, reassurance, routine updates, normal pregnancy questions
-
-Patient context:
-{patient_context}
-
-Conversation history:
-{conversation_history}
-
-Return ONLY valid JSON in this exact format, no explanation, no markdown:
-{"reply": "your response here", "triage_level": "low|medium|high"}
-```
-
-**Response handling:**
 ```python
-raw = llm_service.classify_message(message, system_prompt)
-parsed = json.loads(raw)
-reply = parsed["reply"]
-triage_level = parsed["triage_level"]  # "low" | "medium" | "high"
-```
+RUBRIC_VERSION = "v1.0"
 
-If JSON parsing fails (model returns malformed output) → fallback:
-```python
-reply = "I received your message. Please contact your hospital if this is urgent."
-triage_level = "medium"  # conservative default
-```
+QUESTION_WEIGHTS = {
+    "age_outside_range":       3,   # age ≤17 or ≥35
+    "previous_loss":           3,
+    "previous_stillbirth":     4,
+    "previous_caesarean":      2,
+    "previous_preeclampsia":   4,
+    "has_hypertension":        4,
+    "has_diabetes":            4,
+    "has_sickle_cell":         3,
+    "has_hiv":                 3,
+    "has_severe_anaemia":      3,
+    "multiple_pregnancy":      3,
+    "late_anc_initiation":     2,
+    "no_prior_anc":            3,
+}
 
-If triage_level is "high" → TODO M6: alert hospital in real time.
-
----
-
-## 10. PAUSE / STOP / RESUME Handling
-
-Checked before any other logic. Case-insensitive. Exact word match.
-
-| Keyword | Effect | Bot reply |
-|---|---|---|
-| PAUSE | Set opt_out_status="paused", paused_until=now+7days | Single warm confirmation, no follow-up |
-| STOP  | Set opt_out_status="stopped" | Single warm confirmation, no follow-up |
-| RESUME | Clear opt_out_status, clear paused_until | Single warm confirmation |
-
-Add to patients table:
-```
-opt_out_status   VARCHAR   null | "paused" | "stopped"
-paused_until     TIMESTAMP null | datetime (set when PAUSE received)
-```
-
-Scheduler must check opt_out_status before sending any proactive message.
-
----
-
-## 11. Updated Chat Response Schema
-
-```json
-{
-  "reply": "string",
-  "triage_level": "low | medium | high",
-  "loss_detected": false
+RISK_THRESHOLDS = {
+    "high":   8,    # score >= 8 → high
+    "medium": 4,    # score >= 4 → medium
+                    # score < 4  → low
 }
 ```
 
-`loss_detected` carried forward from M2 for the frontend to handle
-post-loss UI changes.
+The scoring function reads from this config — never from hardcoded values.
 
 ---
 
-## 12. Folder Structure (current state)
+## 8. LLM Service Architecture
+
+### `app/services/llm_service.py`
+
+```python
+# Interface:
+class BaseLLMService(ABC):
+    def classify_message(self, message: str, system_prompt: str) -> str: ...
+
+# Implementations:
+class GroqLLMService(BaseLLMService):   # LLM_PROVIDER=groq  → local dev
+class BedrockLLMService(BaseLLMService): # LLM_PROVIDER=bedrock → production
+
+# Factory (reads LLM_PROVIDER from settings):
+def get_llm_service() -> BaseLLMService: ...
+
+llm_service = get_llm_service()  # module-level singleton
+```
+
+All other modules import only `llm_service`. Never import Groq or boto3
+directly in endpoint or business logic files.
+
+### Loss Detection Prompts (`app/services/prompts.py`)
+
+```python
+LOSS_DETECTION_PROMPT = """
+You are a medical assistant reviewing a patient message from a maternal
+health platform. Determine if the patient is reporting a pregnancy loss
+(miscarriage, stillbirth, or fetal death).
+
+Reply with ONLY one of these three words:
+CONFIRMED  — patient is clearly reporting a pregnancy loss
+AMBIGUOUS  — message is unclear, could mean something else
+NOT_A_LOSS — patient is not reporting a pregnancy loss
+
+Do not add any explanation or punctuation. One word only.
+"""
+
+LOSS_KEYWORDS = [
+    "lost my baby", "lost the baby", "lost my pregnancy",
+    "had a miscarriage", "i miscarried", "miscarriage",
+    "pregnancy loss", "lost my child", "stillbirth",
+    "my baby died", "baby did not make it", "baby didn't make it",
+    "i lost my pregnancy", "lost the pregnancy",
+]
+```
+
+---
+
+## 9. New M2 Endpoints
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `GET /patients/{id}` | GET | JWT (clinician or self) | Full profile with current GA, risk level, pregnancy |
+| `GET /patients/{id}/pregnancy` | GET | JWT | Current pregnancy record |
+| `PATCH /patients/{id}/risk-level` | PATCH | JWT (clinician only) | Override risk level — logged to risk_assessments |
+| `GET /patients/{id}/risk-assessments` | GET | JWT (clinician) | Full risk level audit trail |
+| `POST /chat/message` | POST | JWT (patient) | Receive patient message → run loss detection → triage |
+
+The `POST /chat/message` endpoint is the entry point for all patient messages.
+In M2 it handles loss detection. In M4 it will be extended with full triage.
+
+### Appointment + Notification Endpoints (current feature)
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `POST /appointments` | POST | JWT (patient) | Book an appointment; hospital taken from patient; datetime must be future |
+| `GET /appointments` | GET | JWT (patient or hospital) | Patient sees own; hospital sees all of theirs. `?upcoming_only=true` optional |
+| `DELETE /appointments/{id}` | DELETE | JWT (owner patient or hospital) | Soft-delete one appointment |
+| `DELETE /appointments` | DELETE | JWT | Bulk soft-delete; returns `deleted` / `not_found` / `access_denied` lists |
+| `GET /notifications/unread` | GET | JWT (patient) | Unread out reminder/checkin/crisis messages for the bell/banner |
+| `POST /notifications/acknowledge` | POST | JWT (patient) | Mark listed messages read so the badge clears |
+
+---
+
+## 10. Folder Structure (updated for M2)
 
 ```
 app/
 ├── main.py
 ├── core/
-│   ├── config.py
-│   ├── database.py
-│   └── risk_config.py
+│   ├── config.py              # pydantic-settings Settings
+│   ├── database.py            # engine, SessionLocal, Base, get_db
+│   └── risk_config.py         # QUESTION_WEIGHTS, RISK_THRESHOLDS, RUBRIC_VERSION
 ├── models/
-│   ├── hospital.py
-│   ├── patient.py
-│   ├── pregnancy.py
-│   ├── risk_assessment.py
-│   └── message.py              ← NEW in M3
+│   ├── hospital.py            # Hospital model ✅ done
+│   ├── patient.py             # Patient model ✅ done
+│   ├── pregnancy.py           # Pregnancy model ✅ done
+│   ├── risk_assessment.py     # RiskAssessment model ✅ done
+│   ├── message.py             # Message model ✅ done — ADD is_read column
+│   └── appointment.py         # NEW: Appointment model
 ├── schemas/
-│   ├── hospital.py
-│   ├── patient.py
-│   ├── pregnancy.py
-│   ├── risk_assessment.py
-│   ├── common.py
-│   └── message.py              ← NEW in M3
+│   ├── hospital.py            # ✅ done
+│   ├── patient.py             # ✅ done
+│   ├── pregnancy.py           # ✅ done
+│   ├── risk_assessment.py     # ✅ done
+│   ├── appointment.py         # NEW: AppointmentCreate/Response/DeleteRequest
+│   └── common.py              # LoginRequest, TokenResponse ✅ done
 ├── routers/
-│   ├── auth.py
-│   ├── hospitals.py
-│   ├── patients.py
-│   └── chat.py                 ← UPDATED in M3
+│   ├── auth.py                # ✅ done
+│   ├── hospitals.py           # ✅ done
+│   ├── patients.py            # ✅ done
+│   ├── chat.py                # ✅ done
+│   ├── appointments.py        # NEW: create / list / delete (single + bulk)
+│   └── notifications.py       # NEW: GET /unread, POST /acknowledge
 ├── services/
-│   ├── llm_service.py
-│   ├── prompts.py              ← UPDATED in M3
-│   ├── loss_detection.py
-│   ├── risk_scoring.py
-│   └── conversation.py         ← NEW in M3
+│   ├── llm_service.py         # ✅ done: Groq/Bedrock abstraction
+│   ├── prompts.py             # ✅ done
+│   ├── loss_detection.py      # ✅ done
+│   ├── risk_scoring.py        # ✅ done
+│   ├── message_store.py       # ✅ done: save_inbound / save_outbound
+│   ├── sms_service.py         # NEW: Queen SMS abstraction (sms_service singleton)
+│   ├── reminder_sender.py     # NEW: compose + dispatch 24h/2h reminders by channel
+│   └── scheduler.py           # NEW: APScheduler job, every 15 min
 └── utils/
-    ├── auth.py
-    └── pregnancy.py
+    ├── auth.py                # ✅ done
+    └── pregnancy.py           # ✅ done — compute_lmp_and_edd()
 ```
 
 ---
 
-## 13. Hard Rules
+## 11. Hard Rules — Non-Negotiable
 
-1. Bot never prescribes drugs or dosages
-2. All clinical content approved by Dr Elvira
-3. Phone number is the unique identifier — never email
-4. Never return hashed_password in any response
-5. Auth errors always generic
-6. hospital_id on Patient always a validated FK
-7. lmp and edd computed at signup, stored, never recomputed per request
-8. Risk level system-computed at signup, clinician can override, always logged
-9. Loss detected from patient chat — never inferred silently, always LLM-confirmed
-10. All LLM calls through llm_service only
-11. LLM_PROVIDER=groq for dev, bedrock for prod — one env var, no code changes
-12. Message acuity and patient risk level are independent — never conflate
-13. PAUSE/STOP/RESUME checked before any other message logic
-14. JSON parse failures in LLM responses always have a safe fallback
-15. Every inbound and outbound message saved to messages table
+1. Bot never prescribes drugs or dosages.
+2. All clinical content approved by Dr Elvira before release.
+3. Patient data encrypted, access-logged, consent-based.
+4. Pregnancy-loss content gentle, opt-out-friendly, never auto-triggered
+   except by the loss detection pipeline which has LLM confirmation.
+5. Phone number is the unique identifier. Never use email for login.
+6. Never return `hashed_password` in any response.
+7. Auth errors always generic — never confirm if a phone exists.
+8. `hospital_id` on Patient is always a validated FK.
+9. `lmp` and `edd` computed at signup, stored, never recomputed per request.
+10. Risk level is system-computed at signup. Clinicians can override.
+    Either way it is logged to risk_assessments.
+11. Loss is detected from patient chat messages — not from clinician action.
+    Always runs keyword check first, then LLM confirmation.
+12. All LLM calls go through `llm_service` — never call Groq or boto3 directly
+    in endpoint or business logic code.
+13. `LLM_PROVIDER=groq` for local development. `LLM_PROVIDER=bedrock` for
+    production. One env var change = full migration. No code changes.
+14. Message acuity and patient risk level are independent. Never conflate them.
+15. Choronko patients receive identical care — every message needs full + SMS form.
+16. All secrets via `settings.*` — no hardcoded credentials.
+17. All SMS sends go through `sms_service` (Queen SMS) — never call the Queen SMS
+    HTTP endpoint directly from a router or business-logic file. Choronko →
+    SMS; smartphone → in-app message + unread poll flag.
+18. Appointments are soft-deleted only (`is_deleted=True`) — never hard delete.
+    Each appointment is access-controlled per record on delete.
+19. Reminders fire exactly once each (24h, 2h) — guard with
+    `reminder_24h_sent` / `reminder_2h_sent`. One send failure must not stop the
+    scheduler job (wrap each send in try/except).
 
 ---
 
-## 14. Pending for Future Sprints
+## 12. AWS Free Tier — Accurate Information (verified May 2026)
 
-- Personnel table (hospital has many named staff profiles, one hospital login)
-- Tips system (RAG-based, scheduled daily generation)
-- Appointment reminders
-- M4 advanced triage refinement
-- M6 real-time hospital alerting
-- M9 post-loss care track
-- Choronko SMS channel
-- AWS migration (EventBridge + Lambda replaces APScheduler)
+**Your original assumption (1 year free) is outdated.**
 
-*Last updated: Sprint 3 — M3 Conversation + Triage*
-*M1 ✅  M2 ✅  M3 (conversation + triage) in progress*
+For accounts created after July 15, 2025:
+- $100 credits on signup + $100 more by completing 5 onboarding tasks = $200 total
+- Credits expire after **6 months** (not 12)
+- Bedrock has NO permanent free tier — it uses your credits, then pay-per-token
+- Comprehend has a 12-month trial for older accounts; check current AWS page for new accounts
+
+Always Free services (never expire, relevant to HASH):
+- Lambda: 1M invocations/month
+- SNS: 1M publishes/month
+- SES: 62K emails/month
+- S3: 5 GB storage
+- DynamoDB: 25 GB (not used in HASH — using Supabase instead)
+
+**Strategy:**
+- Build everything locally with Groq (free, unlimited for dev)
+- Set up AWS only when ready to deploy
+- Use $200 credits for Bedrock testing in staging
+- Set a $0 AWS Budget alert before your first AWS API call
+- Every public IPv4 address costs $0.005/hour — release unused ones
+
+---
+
+## 13. What Is Out of Scope for MVP
+
+- WhatsApp channel (Phase 2)
+- Multi-tier referral graph (Phase 2)
+- PHQ-9 and EPDS (Phase 2 — MVP ships PHQ-2 in M9 only)
+- FHIR / EHR export (Phase 2)
+- Insurance, billing, prescriptions (permanently excluded)
+- Telehealth video
+
+**M9 Post-Pregnancy-Loss Care IS in MVP scope.** It is a launch requirement.
+
+---
+
+*Last updated: Sprint 4 — Proactive Check-ins*
+*Status: M1 ✅ M2 ✅ M3 ✅ (chat pipeline + triage + appointments + tips + check-ins all complete)*
+*SMS provider: Queen SMS (live). Source: SRS HASH MVP v1.2 + product clarifications*
