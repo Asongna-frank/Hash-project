@@ -3,36 +3,34 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, String, UUID
+from sqlalchemy import Boolean, Column, DateTime, Float, String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 
 
 class Hospital(Base):
-    """Hospital entity — standalone reference table."""
-
     __tablename__ = "hospitals"
 
-    # Primary key
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    # Hospital identification
     name = Column(String, nullable=False)
     phone = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
 
-    # Location
     gps_lat = Column(Float, nullable=True)
     gps_lng = Column(Float, nullable=True)
     address = Column(String, nullable=False)
 
-    # Staff contact
-    personnel_name = Column(String, nullable=False)
-    personnel_contact = Column(String, nullable=False)
+    # Soft-delete flag — inactive hospitals are hidden from public listings
+    is_active = Column(Boolean, nullable=False, default=True)
 
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=None, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
-    # Relationships
+    # One hospital → many personnel (managed records, not login users)
+    personnel = relationship("Personnel", back_populates="hospital",
+                             cascade="all, delete-orphan")
+
+    # Other relationships
     appointments = relationship("Appointment", back_populates="hospital")

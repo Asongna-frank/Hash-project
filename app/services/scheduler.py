@@ -2,16 +2,19 @@
 """
 APScheduler background jobs.
 
-Local dev: runs inside the FastAPI process.
-Production (AWS): swap the trigger for EventBridge + Lambda — the job functions
-stay identical.
+Local dev: runs inside the FastAPI process (started in startup_event in main.py).
+Production (AWS): replace with EventBridge + Lambda — the job functions stay identical.
 
-Job: check_appointment_reminders — every 15 minutes, find appointments due a
-24h or 2h reminder and deliver them. The +/-15 min window absorbs the polling
-interval so nothing is missed.
+Guard against double-start:
+  Under `uvicorn --reload`, the file watcher can trigger startup_event twice in
+  the same process.  We check `scheduler.running` before calling start().
+  For multi-worker deployments (uvicorn --workers N) use a dedicated scheduler
+  process or a distributed task queue — running N scheduler copies sends N copies
+  of every alarm.
 """
 
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,53 +23,78 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import SessionLocal
 from app.models.appointment import Appointment
-from app.services.reminder_sender import send_24h_reminder, send_2h_reminder
+from app.services.reminder_sender import send_alarm_1, send_alarm_2
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
 
+# ±half-interval window so no alarm is missed between polls (5 min interval → 3 min).
+_WINDOW = timedelta(minutes=3)
+_ALARM1_OFFSET = timedelta(minutes=30)  # alarm 1 fires 30 min before reminder_datetime
+
 
 def check_appointment_reminders() -> None:
+    """
+    Every 5 minutes: find appointments whose alarm windows are open and deliver.
+
+    Alarm 1 window: now ∈ [reminder_dt − 30min − 3min,  reminder_dt − 30min + 3min]
+    Alarm 2 window: now ∈ [reminder_dt − 3min,            reminder_dt + 3min]
+    """
     db: Session = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
 
-        # --- 24h window ---
-        due_24h = db.query(Appointment).options(
-            joinedload(Appointment.patient)
-        ).filter(
-            Appointment.is_deleted == False,
-            Appointment.reminder_24h_sent == False,
-            Appointment.appointment_datetime >= now + timedelta(hours=23),
-            Appointment.appointment_datetime <= now + timedelta(hours=25),
-        ).all()
+        # Alarm 1: 30 min before reminder_datetime
+        a1_low  = now + _ALARM1_OFFSET - _WINDOW   # reminder_dt >= now+27min
+        a1_high = now + _ALARM1_OFFSET + _WINDOW   # reminder_dt <= now+33min
 
-        for appt in due_24h:
+        due_alarm1 = (
+            db.query(Appointment)
+            .options(joinedload(Appointment.patient))
+            .filter(
+                Appointment.is_deleted.is_(False),
+                Appointment.alarm_1_sent.is_(False),
+                Appointment.reminder_datetime >= a1_low,
+                Appointment.reminder_datetime <= a1_high,
+            )
+            .all()
+        )
+
+        for appt in due_alarm1:
             try:
-                send_24h_reminder(appt, db)
+                send_alarm_1(appt, db)
             except Exception as exc:
                 db.rollback()
-                logger.error("24h reminder failed | appt=%s | %s", appt.id, exc)
+                logger.error("Alarm 1 failed | appt=%s | %s", appt.id, exc)
 
-        # --- 2h window ---
-        due_2h = db.query(Appointment).options(
-            joinedload(Appointment.patient)
-        ).filter(
-            Appointment.is_deleted == False,
-            Appointment.reminder_2h_sent == False,
-            Appointment.appointment_datetime >= now + timedelta(hours=1, minutes=45),
-            Appointment.appointment_datetime <= now + timedelta(hours=2, minutes=15),
-        ).all()
+        # Alarm 2: at reminder_datetime
+        a2_low  = now - _WINDOW   # reminder_dt >= now−3min
+        a2_high = now + _WINDOW   # reminder_dt <= now+3min
 
-        for appt in due_2h:
+        due_alarm2 = (
+            db.query(Appointment)
+            .options(joinedload(Appointment.patient))
+            .filter(
+                Appointment.is_deleted.is_(False),
+                Appointment.alarm_2_sent.is_(False),
+                Appointment.reminder_datetime >= a2_low,
+                Appointment.reminder_datetime <= a2_high,
+            )
+            .all()
+        )
+
+        for appt in due_alarm2:
             try:
-                send_2h_reminder(appt, db)
+                send_alarm_2(appt, db)
             except Exception as exc:
                 db.rollback()
-                logger.error("2h reminder failed | appt=%s | %s", appt.id, exc)
+                logger.error("Alarm 2 failed | appt=%s | %s", appt.id, exc)
 
-        if due_24h or due_2h:
-            logger.info("Reminder check | 24h=%d | 2h=%d", len(due_24h), len(due_2h))
+        if due_alarm1 or due_alarm2:
+            logger.info(
+                "Alarm check | alarm_1=%d alarm_2=%d",
+                len(due_alarm1), len(due_alarm2),
+            )
     except Exception as exc:
         logger.error("Reminder scheduler job failed: %s", exc)
     finally:
@@ -76,19 +104,14 @@ def check_appointment_reminders() -> None:
 scheduler.add_job(
     check_appointment_reminders,
     trigger="interval",
-    minutes=15,
+    minutes=5,
     id="appointment_reminders",
     replace_existing=True,
 )
 
 
 def send_all_daily_tips() -> None:
-    """
-    Daily job — fires at 07:00 UTC (08:00 Cameroon / Africa/Douala).
-    Iterates all active and post-loss patients and delivers each their
-    personalized daily tip. Each patient is isolated in try/except so one
-    failure never blocks the rest of the batch.
-    """
+    """Daily job — 07:00 UTC (08:00 Cameroon). Sends personalised daily tip to every active patient."""
     from app.models.patient import Patient
     from app.services.tip_sender import send_daily_tip
 
@@ -100,7 +123,6 @@ def send_all_daily_tips() -> None:
             .filter(Patient.status.in_(["active", "post_loss"]))
             .all()
         )
-
         for patient in patients:
             try:
                 send_daily_tip(patient, db)
@@ -129,18 +151,7 @@ scheduler.add_job(
 
 
 def send_all_checkins() -> None:
-    """
-    Daily job — fires at 08:00 UTC (09:00 Cameroon / Africa/Douala).
-    Iterates all active and post-loss patients and delivers a proactive
-    wellness check-in to those whose risk-level interval has elapsed.
-
-    Delivery cadence per risk level:
-      high   → daily   (≥20 h since last check-in)
-      medium → weekly  (≥6.5 days since last check-in)
-      low    → every fortnight (≥13 days), PLUS milestone weeks 12/20/28/36
-
-    Each patient is isolated in try/except so one failure never blocks the rest.
-    """
+    """Daily job — 08:00 UTC. Sends proactive check-ins to patients whose risk-interval has elapsed."""
     from app.models.patient import Patient
     from app.services.checkin_sender import send_checkin
 

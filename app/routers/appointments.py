@@ -1,6 +1,6 @@
 # app/routers/appointments.py
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,52 +11,53 @@ from app.models.appointment import Appointment
 from app.models.patient import Patient
 from app.schemas.appointment import (
     AppointmentCreate,
-    AppointmentResponse,
     AppointmentDeleteRequest,
+    AppointmentResponse,
 )
+from app.utils.access import require_patient
 from app.utils.auth import get_current_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _get_patient(patient_id: str, db: Session) -> Patient:
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-    return patient
+# ── Patient-created appointments ──────────────────────────────────────────────
 
-
-# CREATE — POST /appointments
 @router.post("", response_model=AppointmentResponse, status_code=201)
 def create_appointment(
     body: AppointmentCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    patient_id: str = Depends(require_patient),
 ):
-    if current_user["type"] != "patient":
-        raise HTTPException(status_code=403, detail="Patients only")
-
-    patient = _get_patient(current_user["user_id"], db)
-
-    if body.appointment_datetime <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Appointment datetime must be in the future")
+    """
+    Patient books their own appointment.
+    hospital_id is taken from the patient's record — never submitted.
+    reminder_datetime is patient-supplied (validated: future and <= appointment).
+    No confirmation SMS is sent for patient-created appointments.
+    """
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
 
     appointment = Appointment(
         patient_id=patient.id,
-        hospital_id=patient.hospital_id,   # taken from patient, never submitted
+        hospital_id=patient.hospital_id,
         title=body.title,
         notes=body.notes,
         appointment_datetime=body.appointment_datetime,
+        reminder_datetime=body.reminder_datetime,
+        created_by="patient",
     )
     db.add(appointment)
     db.commit()
     db.refresh(appointment)
-    logger.info("Appointment created | patient=%s | dt=%s", patient.id, body.appointment_datetime)
+    logger.info(
+        "Appointment created by patient | patient=%s | appt=%s | reminder=%s",
+        patient.id, body.appointment_datetime, body.reminder_datetime,
+    )
     return appointment
 
 
-# LIST — GET /appointments
 @router.get("", response_model=list[AppointmentResponse])
 def list_appointments(
     db: Session = Depends(get_db),
@@ -68,12 +69,12 @@ def list_appointments(
     if current_user["type"] == "patient":
         query = db.query(Appointment).filter(
             Appointment.patient_id == current_user["user_id"],
-            Appointment.is_deleted == False,
+            Appointment.is_deleted.is_(False),
         )
     elif current_user["type"] == "hospital":
         query = db.query(Appointment).filter(
             Appointment.hospital_id == current_user["user_id"],
-            Appointment.is_deleted == False,
+            Appointment.is_deleted.is_(False),
         )
     else:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -84,7 +85,6 @@ def list_appointments(
     return query.order_by(Appointment.appointment_datetime.asc()).all()
 
 
-# DELETE ONE — DELETE /appointments/{id}
 @router.delete("/{appointment_id}", status_code=200)
 def delete_appointment(
     appointment_id: UUID,
@@ -93,7 +93,7 @@ def delete_appointment(
 ):
     appointment = db.query(Appointment).filter(
         Appointment.id == appointment_id,
-        Appointment.is_deleted == False,
+        Appointment.is_deleted.is_(False),
     ).first()
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found")
@@ -111,7 +111,6 @@ def delete_appointment(
     return {"deleted": True, "id": str(appointment_id)}
 
 
-# DELETE MANY — DELETE /appointments
 @router.delete("", status_code=200)
 def delete_appointments_bulk(
     body: AppointmentDeleteRequest,
@@ -123,7 +122,7 @@ def delete_appointments_bulk(
     for appt_id in body.ids:
         appointment = db.query(Appointment).filter(
             Appointment.id == appt_id,
-            Appointment.is_deleted == False,
+            Appointment.is_deleted.is_(False),
         ).first()
         if not appointment:
             not_found.append(str(appt_id))
@@ -142,5 +141,4 @@ def delete_appointments_bulk(
         deleted.append(str(appt_id))
 
     db.commit()
-    logger.info("Bulk delete | deleted=%s | not_found=%s | denied=%s", deleted, not_found, denied)
     return {"deleted": deleted, "not_found": not_found, "access_denied": denied}

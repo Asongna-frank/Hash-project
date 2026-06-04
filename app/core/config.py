@@ -13,18 +13,27 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"
     GROQ_API_KEY: str = ""
 
-    # Queen SMS (choronko track)
-    QUEEN_SMS_API_KEY: str
-    QUEEN_SMS_SENDER_ID: str = "HASH"            # max 11 chars, must be an APPROVED sender id
-    QUEEN_SMS_BASE_URL: str = "https://api.queensms.net/v1"
+    # Twilio SMS (choronko track).
+    # Add these to .env:
+    #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    #   TWILIO_AUTH_TOKEN=your_auth_token
+    #   TWILIO_FROM_NUMBER=+1xxxxxxxxxx   (must be SMS-capable for +237 Cameroon)
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
 
-    # Future AWS fields — add when AWS is set up:
-    # AWS_REGION: str = "us-east-1"
+    # OneSignal push (smartphone track).
+    # Add these to .env:
+    #   ONESIGNAL_APP_ID=your_app_id
+    #   ONESIGNAL_REST_API_KEY=os_v2_app_...
+    # Flutter app must call OneSignal.login(<patient_uuid>) at sign-in so the
+    # device is addressable by the same UUID the backend uses.
+    ONESIGNAL_APP_ID: str = ""
+    ONESIGNAL_REST_API_KEY: str = ""
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
 
 
-# Module-level settings instance
 settings = Settings()

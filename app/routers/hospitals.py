@@ -1,11 +1,14 @@
-"""Hospitals router for hospital discovery."""
+"""Hospital CRUD router."""
 
-from fastapi import APIRouter, Depends
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.hospital import Hospital
-from app.schemas.hospital import HospitalPublic
+from app.schemas.hospital import HospitalPublic, HospitalResponse, HospitalUpdate
+from app.utils.access import require_hospital
 
 router = APIRouter(tags=["hospitals"])
 
@@ -17,21 +20,74 @@ def list_hospitals(
     db: Session = Depends(get_db),
 ):
     """
-    Get a public list of hospitals.
-
-    Returns hospital name, address, and GPS coordinates for patient discovery.
-    Does not require authentication.
-
-    # TODO Phase 2: Add location-based filtering (region, lat/lng + radius_km)
-    # when hospital count grows across multiple countries.
-    # The gps_lat and gps_lng columns are already stored for this purpose.
-
-    Args:
-        skip: Number of hospitals to skip (pagination).
-        limit: Maximum number of hospitals to return.
-
-    Returns:
-        List of HospitalPublic objects (public-facing hospital data).
+    Public list of active hospitals — safe for unauthenticated callers.
+    Never exposes phone, password, or personnel details.
     """
-    hospitals = db.query(Hospital).offset(skip).limit(limit).all()
-    return hospitals
+    return (
+        db.query(Hospital)
+        .filter(Hospital.is_active.is_(True))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/hospitals/{hospital_id}", response_model=HospitalResponse)
+def get_hospital(
+    hospital_id: UUID,
+    db: Session = Depends(get_db),
+    caller_id: str = Depends(require_hospital),
+):
+    """Return the authenticated hospital's own full profile."""
+    if str(hospital_id) != caller_id:
+        raise HTTPException(status_code=403, detail="You can only view your own hospital")
+
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not hospital or not hospital.is_active:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    return hospital
+
+
+@router.patch("/hospitals/{hospital_id}", response_model=HospitalResponse)
+def update_hospital(
+    hospital_id: UUID,
+    body: HospitalUpdate,
+    db: Session = Depends(get_db),
+    caller_id: str = Depends(require_hospital),
+):
+    """Edit own hospital profile. Cannot edit another hospital's record."""
+    if str(hospital_id) != caller_id:
+        raise HTTPException(status_code=403, detail="You can only edit your own hospital")
+
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not hospital or not hospital.is_active:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(hospital, field, value)
+
+    db.commit()
+    db.refresh(hospital)
+    return hospital
+
+
+@router.delete("/hospitals/{hospital_id}", status_code=204)
+def delete_hospital(
+    hospital_id: UUID,
+    db: Session = Depends(get_db),
+    caller_id: str = Depends(require_hospital),
+):
+    """
+    Soft-delete own hospital: sets is_active=False.
+    The hospital disappears from GET /hospitals but the row and all linked
+    records (patients, appointments) remain in the database.
+    """
+    if str(hospital_id) != caller_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own hospital")
+
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not hospital or not hospital.is_active:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    hospital.is_active = False
+    db.commit()

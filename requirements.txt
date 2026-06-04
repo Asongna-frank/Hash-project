@@ -21,5 +21,9 @@ bcrypt==4.0.1
 
 # --- External services ---
 groq==1.4.0            # LLM provider (local dev)
-httpx==0.28.1          # Queen SMS HTTP client + groq transport
+httpx==0.28.1          # HTTP client (groq transport)
+twilio                 # SMS provider (choronko track)
 APScheduler==3.11.2    # appointment reminder scheduler
+
+# --- Testing ---
+freezegun              # deterministic datetime in tests

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.message import Message
 from app.models.patient import Patient
 from app.services.message_store import save_outbound
+from app.services.push_service import push_service
 from app.services.sms_service import sms_service
 from app.services.tip_generator import generate_daily_tip
 
@@ -70,6 +71,16 @@ def send_daily_tip(patient: Patient, db: Session) -> None:
         msg = save_outbound(patient.id, tip_text, channel="sms", message_type="tip")
     else:
         msg = save_outbound(patient.id, tip_text, channel="app", message_type="tip")
+        result = push_service.send_push(
+            patient_uuid=str(patient.id),
+            title="HASH — Daily Tip",
+            message=tip_text,
+        )
+        if not result.ok:
+            logger.warning(
+                "Push notification failed for daily tip | patient=%s | %s",
+                patient.id, result.error,
+            )
 
     db.add(msg)
     db.commit()

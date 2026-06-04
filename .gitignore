@@ -2,3 +2,5 @@ venv/
 __pycache__/
 *.pyc
 .env
+explanation files/
+SRS HASH MVP(1).docx

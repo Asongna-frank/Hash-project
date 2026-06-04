@@ -46,7 +46,8 @@ class Patient(Base):
     preferred_support = Column(String, default="none")  # none|faith|peer|counsellor
 
     # Clinical history (questionnaire answers)
-    previous_loss = Column(Boolean, default=False)
+    previous_loss = Column(Boolean, default=False)           # kept for back-compat; derived as (count > 0)
+    previous_loss_count = Column(Integer, default=0)         # v2: number of prior losses (scored)
     previous_stillbirth = Column(Boolean, default=False)
     previous_caesarean = Column(Boolean, default=False)
     previous_preeclampsia = Column(Boolean, default=False)
@@ -56,8 +57,18 @@ class Patient(Base):
     has_hiv = Column(Boolean, default=False)
     has_severe_anaemia = Column(Boolean, default=False)
     multiple_pregnancy = Column(Boolean, default=False)
-    late_anc_initiation = Column(Boolean, default=False)
-    no_prior_anc = Column(Boolean, default=False)
+    late_anc_initiation = Column(Boolean, default=False)     # legacy; contributes 0 to v2 score
+    no_prior_anc = Column(Boolean, default=False)            # legacy; contributes 0 to v2 score
+
+    # v2 signup fields — collected but NOT scored
+    gravidity = Column(Integer, nullable=True)                # context only (double-counts parity+losses)
+    blood_group = Column(String, nullable=True)               # A+/A-/B+/B-/O+/O-/AB+/AB-/unknown
+    distance_close_to_hospital = Column(Boolean, nullable=True)  # for emergency logic, not risk score
+    rh_negative = Column(Boolean, default=False)             # derived from blood_group ending in "-"
+
+    # Missed check-in tracking (for clinician escalation alerts)
+    consecutive_missed_checkins = Column(Integer, default=0)  # resets to 0 on any inbound reply
+    missed_checkin_flag = Column(Boolean, default=False)      # True once escalation threshold crossed
 
     # Risk output — set by system at signup
     risk_level = Column(String, nullable=True)  # low|medium|high
@@ -74,6 +85,11 @@ class Patient(Base):
 
     paused_until = Column(DateTime(timezone=True), nullable=True)
     # set when patient sends PAUSE, cleared when STOP or RESUME received
+
+    # Soft-delete flag — inactive patients are hidden from normal views
+    # TODO: known wrinkle — a soft-deleted patient's unique phone stays reserved.
+    # A future migration should either free the phone or use a partial unique index.
+    is_active = Column(Boolean, nullable=False, default=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=None, nullable=False, default=datetime.utcnow)

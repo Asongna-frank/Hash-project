@@ -1,18 +1,20 @@
 # app/services/sms_service.py
 """
-SMS provider abstraction for HASH.
+SMS provider abstraction — Twilio implementation.
 
-Queen SMS is the only implementation for the MVP. Swapping to Amazon SNS or
-another provider later is a new subclass + a settings change — no caller code
-changes. Never call the Queen SMS HTTP endpoint directly from a router or
-business-logic file; always go through the module-level `sms_service`.
+All SMS sends go through the module-level `sms_service` singleton.
+Never import twilio.rest.Client directly from a router or business-logic file.
+
+TRIAL-ACCOUNT NOTE (leave for operators):
+  Twilio trial accounts can only send to numbers verified in the Twilio Console
+  (Verified Caller IDs). Messages will carry a trial prefix. The FROM number
+  (+TWILIO_FROM_NUMBER) must be SMS-capable for the destination country (+237
+  Cameroon). These are not code bugs — they are trial account restrictions.
 """
 
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
-import httpx
 
 from app.core.config import settings
 
@@ -23,54 +25,60 @@ logger = logging.getLogger(__name__)
 class SMSResult:
     ok: bool
     provider_message_id: str | None = None
-    raw: dict | None = None
     error: str | None = None
 
 
 class BaseSMSService(ABC):
     @abstractmethod
-    def send_sms(self, to: str, message: str) -> SMSResult:
-        """Send a single SMS to one recipient phone number."""
-        ...
+    def send_sms(self, to: str, message: str) -> SMSResult: ...
 
 
-class QueenSMSService(BaseSMSService):
+class TwilioSMSService(BaseSMSService):
+    """
+    Send SMS via Twilio's Messages API.
+
+    `to` must be E.164 (e.g. +2376xxxxxxxx). Ensure patient phones are stored
+    and normalised to E.164 format before passing them here.
+    """
+
     def __init__(self) -> None:
-        self._api_key = settings.QUEEN_SMS_API_KEY
-        self._sender_id = settings.QUEEN_SMS_SENDER_ID
-        self._base_url = settings.QUEEN_SMS_BASE_URL.rstrip("/")
+        try:
+            from twilio.rest import Client
+            self._client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+        except Exception as exc:
+            # Missing or malformed credentials — the service will no-op rather than
+            # prevent app startup.  Real errors surface on the first send attempt.
+            logger.warning("TwilioSMSService init warning: %s", exc)
+            self._client = None
+        self._from = settings.TWILIO_FROM_NUMBER
 
     def send_sms(self, to: str, message: str) -> SMSResult:
-        url = f"{self._base_url}/sms.php"
-        payload = {
-            "api_key": self._api_key,
-            "senderid": self._sender_id,   # max 11 chars
-            "sms": message,
-            "mobiles": to,                 # "237" prefix optional; comma-sep for many
-        }
+        if not self._client:
+            logger.error("Twilio SMS not configured — cannot send to %s", to)
+            return SMSResult(ok=False, error="Twilio not configured")
+
         try:
-            resp = httpx.post(url, data=payload, timeout=15.0)  # x-www-form-urlencoded
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:  # network / non-2xx / bad JSON
-            logger.error("Queen SMS request failed | to=%s | error=%s", to, exc)
-            return SMSResult(ok=False, error=str(exc))
-
-        if data.get("responsecode") == 1:
-            msg_id = None
-            sms_list = data.get("sms") or []
-            if sms_list:
-                msg_id = sms_list[0].get("messageid")
-            logger.info("Queen SMS sent | to=%s | messageid=%s", to, msg_id)
-            return SMSResult(ok=True, provider_message_id=msg_id, raw=data)
-
-        err = data.get("errordescription") or data.get("responsedescription") or "unknown"
-        logger.error("Queen SMS error | to=%s | resp=%s", to, data)
-        return SMSResult(ok=False, raw=data, error=str(err))
+            from twilio.base.exceptions import TwilioRestException
+            msg = self._client.messages.create(
+                body=message, from_=self._from, to=to
+            )
+            logger.info(
+                "Twilio SMS sent | to=%s | sid=%s | status=%s",
+                to, msg.sid, msg.status,
+            )
+            return SMSResult(ok=True, provider_message_id=msg.sid)
+        except Exception as exc:
+            # Catch TwilioRestException (code + msg attributes) and any other error.
+            code = getattr(exc, "code", None)
+            detail = getattr(exc, "msg", None) or str(exc)
+            logger.error(
+                "Twilio SMS failed | to=%s | code=%s | %s", to, code, detail
+            )
+            return SMSResult(ok=False, error=f"{code}: {detail}" if code else detail)
 
 
 def get_sms_service() -> BaseSMSService:
-    return QueenSMSService()
+    return TwilioSMSService()
 
 
-sms_service = get_sms_service()  # module-level singleton — import this everywhere
+sms_service: BaseSMSService = get_sms_service()  # import this everywhere

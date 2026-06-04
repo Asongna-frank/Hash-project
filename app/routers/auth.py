@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.models.hospital import Hospital
 from app.models.patient import Patient
 from app.schemas.common import LoginRequest, TokenResponse
+from app.models.personnel import Personnel
 from app.schemas.hospital import HospitalCreate, HospitalResponse
 from app.schemas.patient import PatientCreate, PatientResponse
 from app.utils.auth import (
@@ -20,7 +21,7 @@ from app.utils.pregnancy import compute_lmp_and_edd
 from datetime import datetime, timezone, date as date_type
 from app.models.pregnancy import Pregnancy
 from app.models.risk_assessment import RiskAssessment
-from app.services.risk_scoring import compute_risk_level
+from app.services.risk_scoring import compute_risk
 from app.schemas.patient import PatientCreate, PatientResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -56,11 +57,21 @@ def hospital_signup(
         gps_lat=hospital_data.gps_lat,
         gps_lng=hospital_data.gps_lng,
         address=hospital_data.address,
-        personnel_name=hospital_data.personnel_name,
-        personnel_contact=hospital_data.personnel_contact,
+        is_active=True,
     )
-
     db.add(hospital)
+    db.flush()  # get hospital.id before committing
+
+    # Create first personnel in the same transaction — rolls back with hospital on failure
+    fp = hospital_data.first_personnel
+    personnel = Personnel(
+        hospital_id=hospital.id,
+        name=fp.name,
+        phone=fp.phone,
+        email=fp.email,
+        role=fp.role,
+    )
+    db.add(personnel)
     db.commit()
     db.refresh(hospital)
 
@@ -119,6 +130,11 @@ def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
     from app.utils.auth import hash_password
     hashed = hash_password(body.password)
 
+    # 5. Derive rh_negative from blood_group
+    rh_negative = (
+        body.blood_group is not None and body.blood_group.endswith("-")
+    )
+
     # 5. Create patient record
     patient = Patient(
         name=body.name,
@@ -132,7 +148,9 @@ def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
         parity=body.parity,
         language=body.language,
         preferred_support=body.preferred_support,
+        # loss — keep boolean for back-compat, store count for v2 scoring
         previous_loss=body.previous_loss,
+        previous_loss_count=body.previous_loss_count,
         previous_stillbirth=body.previous_stillbirth,
         previous_caesarean=body.previous_caesarean,
         previous_preeclampsia=body.previous_preeclampsia,
@@ -144,39 +162,48 @@ def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
         multiple_pregnancy=body.multiple_pregnancy,
         late_anc_initiation=body.late_anc_initiation,
         no_prior_anc=body.no_prior_anc,
+        # v2 collected-but-not-scored
+        gravidity=body.gravidity,
+        blood_group=body.blood_group,
+        distance_close_to_hospital=body.distance_close_to_hospital,
+        rh_negative=rh_negative,
         account_type="smartphone",
         status="active",
     )
     db.add(patient)
     db.flush()  # get patient.id without committing
 
-    # 6. Compute risk level
+    # 6. Compute risk level (v2 rubric — graded age + loss bands)
     answers = {
-        "age_outside_range":     body.age <= 17 or body.age >= 35,
-        "previous_loss":         body.previous_loss,
-        "previous_stillbirth":   body.previous_stillbirth,
-        "previous_caesarean":    body.previous_caesarean,
-        "previous_preeclampsia": body.previous_preeclampsia,
-        "has_hypertension":      body.has_hypertension,
-        "has_diabetes":          body.has_diabetes,
-        "has_sickle_cell":       body.has_sickle_cell,
-        "has_hiv":               body.has_hiv,
-        "has_severe_anaemia":    body.has_severe_anaemia,
-        "multiple_pregnancy":    body.multiple_pregnancy,
-        "late_anc_initiation":   body.late_anc_initiation,
-        "no_prior_anc":          body.no_prior_anc,
+        "age":                    body.age,
+        "previous_loss_count":    body.previous_loss_count,
+        "weeks_pregnant_at_signup": body.weeks_pregnant_at_signup,
+        "parity":                 body.parity,
+        "previous_stillbirth":    body.previous_stillbirth,
+        "previous_caesarean":     body.previous_caesarean,
+        "previous_preeclampsia":  body.previous_preeclampsia,
+        "has_hypertension":       body.has_hypertension,
+        "has_diabetes":           body.has_diabetes,
+        "has_sickle_cell":        body.has_sickle_cell,
+        "has_hiv":                body.has_hiv,
+        "has_severe_anaemia":     body.has_severe_anaemia,
+        "multiple_pregnancy":     body.multiple_pregnancy,
     }
-    level, score, rubric_version = compute_risk_level(answers)
+    result = compute_risk(answers)
+    level = result["level"]
+    score = result["score"]
+    rubric_version = result["rubric_version"]
+    breakdown = result["breakdown"]
 
     patient.risk_level = level
     patient.risk_level_set_at = datetime.now(timezone.utc)
     patient.risk_level_set_by = "system"
 
-    # 7. Write RiskAssessment audit record
+    # 7. Write RiskAssessment audit record (inputs includes breakdown for transparency)
     risk_record = RiskAssessment(
         patient_id=patient.id,
         computed_by="system",
-        inputs=answers,
+        inputs={**answers, "_breakdown": breakdown},
         rubric_version=rubric_version,
         result_level=level,
         score=score,

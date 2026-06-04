@@ -28,9 +28,13 @@ needs a full form (in-app) and an SMS-safe short form.
 ### Patient Risk Level
 Computed automatically at signup from weighted questionnaire answers.
 Controls proactive check-in frequency:
-- **High** → daily
-- **Medium** → weekly
-- **Low** → fortnightly + gestational milestones
+- **High** → every 3 days
+- **Medium** → weekly (every 7 days)
+- **Low** → fortnightly (every 14 days)
+
+(High is set to ~2x the frequency of Medium; 7÷2 = 3.5 days, rounded down to 3
+to err toward more contact. Pending Dr Elvira's confirmation that every-3-days
+is acceptable for High rather than daily.)
 
 Can be manually overridden by a clinician. Changes logged. Takes effect within
 5 minutes. Stored on the patient record with full audit trail.
@@ -103,16 +107,26 @@ directly from a router or business-logic file — always via `sms_service`.
 
 ## 4. Completed Modules
 
-### M1 — Identity & Onboarding ✅
-Two completely separate tables — `hospitals` and `patients`. No shared users
-table. No inheritance.
+### M1 — Identity & Onboarding ✅ (updated: personnel normalized + full CRUD)
+Three tables now — `hospitals`, `personnel`, and `patients`. No shared users
+table, no inheritance. Personnel are MANAGED RECORDS, not login users: the
+hospital is the only hospital-side login. JWT `type` is only "hospital" or
+"patient".
 
 **Hospitals table:**
 id, name, phone (unique, login ID), hashed_password, gps_lat, gps_lng,
-address, personnel_name, personnel_contact, created_at
+address, is_active (bool, default True — soft delete), created_at
+(NOTE: `personnel_name`/`personnel_contact` were REMOVED and normalized into the
+personnel table.)
+
+**Personnel table (one hospital → many personnel):**
+id, hospital_id (FK → hospitals.id), name, phone (contact only, not a login),
+email (nullable), role ("doctor"|"midwife"|"nurse"|"admin"), created_at,
+updated_at. No password (no login). Hard-deletable.
 
 **Patients table:**
-id, name, phone (unique, login ID), hashed_password, created_at,
+id, name, phone (unique, login ID), hashed_password, is_active (bool, default
+True — soft delete), created_at,
 hospital_id (FK → hospitals.id),
 weeks_pregnant_at_signup (int, 1–42),
 lmp (computed: today − weeks×7 days),
@@ -122,13 +136,21 @@ history_of_pregnancy_loss (bool, placeholder),
 history_of_smoking (bool, placeholder),
 known_chronic_conditions (str, placeholder)
 
-**Endpoints completed:**
-- POST /auth/hospital/signup
+**Endpoints (M1 + CRUD update):**
+- POST /auth/hospital/signup  ← creates hospital + first personnel (one transaction)
 - POST /auth/hospital/login
-- POST /auth/patient/signup  ← computes and stores lmp + edd
+- POST /auth/patient/signup  ← computes and stores lmp + edd; is_active=True
 - POST /auth/patient/login
 - GET  /auth/me
-- GET  /hospitals  ← public list for signup dropdown
+- Hospital CRUD: GET /hospitals (public, active only), GET/PATCH/DELETE /hospitals/{id} (self; DELETE = soft)
+- Personnel CRUD (hospital-only, own-hospital scoped): POST/GET /hospitals/{id}/personnel, PATCH/DELETE /personnel/{id} (DELETE = hard)
+- Patient CRUD: GET /patients (hospital only, own patients), GET/PATCH/DELETE /patients/{id} (patient-self OR owning hospital; DELETE = soft)
+
+**Access-control model (enforced via reusable dependencies):**
+- Patient → only their own patient record; cannot list patients; no hospital/personnel access.
+- Hospital → own hospital + own personnel + ONLY its own patients (scoped by hospital_id).
+- Out-of-scope patient/personnel requests return 404 (not 403) to avoid leaking which ids exist elsewhere.
+- Personnel are managed records, not logins.
 
 **EDD utility:** `app/utils/pregnancy.py` → `compute_lmp_and_edd(weeks)`
 
@@ -143,59 +165,42 @@ chat-message loss detection (keyword layer → Groq confirmation). See sections
 Multi-turn chat pipeline (`app/routers/chat.py`), message store
 (`app/models/message.py`, `app/services/message_store.py` with
 `save_inbound` / `save_outbound`), per-message Low/Medium/High triage (M4 rules
-folded in), and risk-based proactive check-in cadence. The `messages` table and
-`save_outbound` helper are the delivery substrate that appointment reminders,
-daily tips, and check-ins all reuse — do not modify them.
-
-**Risk-based check-in cadence (fully implemented):**
-- High-risk → daily check-in (≥20 h interval)
-- Medium-risk → weekly (≥6.5 days)
-- Low-risk → fortnightly (≥13 days) + milestone week override (weeks 12/20/28/36 fire
-  an extra check-in if no check-in was sent in the last 7 days)
-- Post-loss patients use a separate grief-support prompt; never pregnancy content
-- Scheduler job fires daily at 08:00 UTC (09:00 Cameroon)
-- Delivery: SMS for choronko patients, in-app for smartphone patients
-- Skips: silenced (stopped/paused), pending_loss_confirmation, not-yet-due
-
-**Key files:**
-- `app/services/checkin_generator.py` — LLM generation (temperature=0.7)
-- `app/services/checkin_sender.py` — idempotent delivery with interval logic
-- `app/services/prompts.py` — `CHECKIN_SYSTEM_PROMPT`, `POST_LOSS_CHECKIN_SYSTEM_PROMPT`
-- `test/test_checkins.py` — 30-assertion test suite (all passing)
+folded in), and risk-based check-in cadence. The `messages` table and
+`save_outbound` helper are the delivery substrate the appointment reminders
+feature reuses — do not modify them.
 
 ---
 
-## 5. Completed Sprint Features (beyond M1–M3 core)
+## 5. Module Being Implemented Now
 
-### Appointment Reminders ✅ (part of M3 / appointment surface)
+### Appointment Reminders (part of M3 / appointment surface)
 
-An alarm-style reminder system. Four endpoints: create, list, soft-delete one,
-bulk soft-delete. Background scheduler (APScheduler, every 15 min) delivers
-24h and 2h reminders exactly once each via SMS (choronko) or in-app message
-(smartphone). 36-assertion test suite passing.
+An alarm-style reminder system for patient appointments. Four capabilities:
 
-### Notification Polling ✅
-`GET /notifications/unread` and `POST /notifications/acknowledge` let the
-Flutter app poll for unread out-bound messages (reminders, check-ins, tips)
-and clear the badge. Stands in for FCM push notifications (Phase 2).
+1. **Create** an appointment — patient submits a title, optional notes, and the
+   appointment datetime. Hospital is taken from the patient's own record (the
+   patient never submits `hospital_id`).
+2. **List** appointments — a patient sees only their own; a hospital user sees
+   all appointments for their hospital. Soft-deleted rows are never returned.
+3. **Delete** one or many — soft delete (`is_deleted=True`), never hard delete.
+   Each row is access-controlled individually.
+4. **Remind** — a background scheduler fires a 24h reminder and a 2h reminder
+   before each appointment, exactly once each, like an alarm.
 
-### Daily Personalized Tips ✅
-AI-generated health tip delivered once per day at 07:00 UTC (08:00 Cameroon).
-Personalized to gestational week, risk level, and all 12 clinical flags.
-Post-loss patients receive grief-support content instead of pregnancy tips.
-`GET /tips/today` endpoint returns today's tip (or `{"tip": null}`) for the
-Flutter home card and chat session bootstrap. 21-assertion test suite passing.
+**Delivery — two formats, chosen by `account_type`:**
+- **Choronko patients → SMS** via Queen SMS (`sms_service`). SMS-safe short form.
+- **Smartphone patients → in-app.** The reminder is written to the `messages`
+  table (`direction="out"`, `message_type="reminder"`) so it appears in chat,
+  **and** flagged unread so the app's notification bell/banner can poll it
+  (this poll-flag is what stands in for a "push notification" in the MVP — true
+  FCM push is Phase 2).
 
-Key files: `app/services/tip_generator.py`, `app/services/tip_sender.py`,
-`app/routers/tips.py`
+The reminder text is warm, plain, and uses the patient's name. Every reminder
+has both a full in-app form and an SMS-safe short form (hard rule 15).
 
-### Proactive Wellness Check-ins ✅
-Risk-based outbound check-ins at cadences defined by patient risk level:
-high → daily, medium → weekly, low → fortnightly + milestone week override.
-Post-loss patients get grief-focused check-ins. Scheduler fires 08:00 UTC
-(09:00 Cameroon). 30-assertion test suite passing.
-
-Key files: `app/services/checkin_generator.py`, `app/services/checkin_sender.py`
+> Reminders reuse the existing `messages` table and `save_outbound` helper from
+> M3. The scheduler runs in-process via APScheduler for local dev; in production
+> it becomes EventBridge + Lambda with the same job functions.
 
 ---
 
@@ -358,33 +363,75 @@ preferred_support         VARCHAR      "none" | "faith" | "peer" | "counsellor"
 
 ## 7. Risk Scoring Config (tunable without code change)
 
-Lives in `app/core/risk_config.py`. Dr Elvira adjusts values here.
+Lives in `app/core/risk_config.py`. Dr Elvira adjusts values here. Weights are
+scaled to published effect sizes (odds ratios) for each factor's association
+with pregnancy loss. This is a clinically-informed heuristic, NOT a validated
+instrument — it decides who needs closer monitoring, never a probability quoted
+to a patient. See `HASH_Risk_Rubric_for_Review.docx` for sources and rationale.
+
+Some factors are graded (age, previous-loss count), so they use small helper
+maps rather than a single flat weight. The scoring function must read every
+value from this config — never hardcode.
 
 ```python
-RUBRIC_VERSION = "v1.0"
+RUBRIC_VERSION = "v2.0"
 
+# Graded factors (the answer picks the band, the band gives the points)
+AGE_WEIGHTS = {
+    "ge40_or_lt16": 4,   # age >= 40 OR < 16
+    "35_to_39":     2,   # age 35-39
+    "16_to_34":     0,   # age 16-34
+}
+
+PREVIOUS_LOSS_WEIGHTS = {   # number of prior pregnancy losses
+    "ge3": 5,   # 3 or more
+    "2":   3,
+    "1":   2,
+    "0":   0,
+}
+
+# Flat boolean factors (present → points)
 QUESTION_WEIGHTS = {
-    "age_outside_range":       3,   # age ≤17 or ≥35
-    "previous_loss":           3,
-    "previous_stillbirth":     4,
-    "previous_caesarean":      2,
-    "previous_preeclampsia":   4,
-    "has_hypertension":        4,
-    "has_diabetes":            4,
-    "has_sickle_cell":         3,
-    "has_hiv":                 3,
-    "has_severe_anaemia":      3,
-    "multiple_pregnancy":      3,
-    "late_anc_initiation":     2,
-    "no_prior_anc":            3,
+    "has_sickle_cell":        4,
+    "has_hypertension":       3,
+    "has_diabetes":           3,
+    "previous_stillbirth":    3,
+    "previous_preeclampsia":  3,
+    "multiple_pregnancy":     3,
+    "has_hiv":                2,
+    "has_severe_anaemia":     2,
+    "previous_caesarean":     1,
+    "first_trimester":        1,   # weeks_pregnant_at_signup < 13
+    "parity_extreme":         1,   # parity == 0 OR parity >= 5
 }
 
 RISK_THRESHOLDS = {
-    "high":   8,    # score >= 8 → high
+    "high":   9,    # score >= 9 → high
     "medium": 4,    # score >= 4 → medium
                     # score < 4  → low
 }
+
+# Cadence in DAYS, keyed by risk level. High ~= 2x Medium frequency.
+CHECK_IN_CADENCE_DAYS = {
+    "high":   3,
+    "medium": 7,
+    "low":    14,
+}
+
+# Missed-response escalation: consecutive missed check-ins that flag a clinician
+MISSED_CHECKIN_ESCALATION = {
+    "high":   3,
+    "medium": 2,
+    # low: not escalated in MVP
+}
 ```
+
+NOTE — collected at signup but deliberately NOT scored (weight 0): gravidity
+(double-counts with parity + losses), blood_group (weak loss predictor; Rh-
+negative raises a clinical anti-D flag instead), distance_to_hospital (feeds
+emergency logic, not baseline loss risk). The OLD placeholder fields
+`late_anc_initiation` and `no_prior_anc` are dropped from scoring; remove them
+from the rubric (keep the columns if already migrated, but they contribute 0).
 
 The scoring function reads from this config — never from hardcoded values.
 
@@ -584,6 +631,7 @@ Always Free services (never expire, relevant to HASH):
 
 ---
 
-*Last updated: Sprint 4 — Proactive Check-ins*
-*Status: M1 ✅ M2 ✅ M3 ✅ (chat pipeline + triage + appointments + tips + check-ins all complete)*
-*SMS provider: Queen SMS (live). Source: SRS HASH MVP v1.2 + product clarifications*
+*Last updated: Sprint 4 — Personnel normalization + full CRUD + access control*
+*Status: M1 (updated), M2, M3 complete. Appointment reminders + risk scoring v2 built. Personnel table + CRUD + scoped access in progress.*
+*Risk rubric pending Dr Elvira sign-off (see HASH_Risk_Rubric_for_Review.docx).*
+*SMS provider: Twilio (outbound only — confirmed delivering to Cameroon). Inbound/two-way choronko SMS NOT supported by Twilio in Cameroon — separate provider (e.g. Africa's Talking) to be chosen later. Source: SRS HASH MVP v1.2 + product clarifications*
