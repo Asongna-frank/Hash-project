@@ -13,7 +13,16 @@ from app.utils.access import require_hospital
 router = APIRouter(tags=["hospitals"])
 
 
-@router.get("/hospitals", response_model=list[HospitalPublic])
+@router.get(
+    "/hospitals",
+    response_model=list[HospitalPublic],
+    summary="List active hospitals (public)",
+    description=(
+        "Public, unauthenticated list of active hospitals — used by the patient "
+        "signup flow to pick a hospital. Returns only id, name, address, and GPS; "
+        "never phone, password, or personnel. Supports skip/limit pagination."
+    ),
+)
 def list_hospitals(
     skip: int = 0,
     limit: int = 100,
@@ -32,7 +41,16 @@ def list_hospitals(
     )
 
 
-@router.get("/hospitals/{hospital_id}", response_model=HospitalResponse)
+@router.get(
+    "/hospitals/{hospital_id}",
+    response_model=HospitalResponse,
+    summary="Get own hospital profile",
+    description=(
+        "Returns the authenticated hospital's own full profile (including phone). "
+        "Hospital auth required; a hospital can only view itself — another id "
+        "returns 403, an inactive/unknown one returns 404."
+    ),
+)
 def get_hospital(
     hospital_id: UUID,
     db: Session = Depends(get_db),
@@ -48,7 +66,15 @@ def get_hospital(
     return hospital
 
 
-@router.patch("/hospitals/{hospital_id}", response_model=HospitalResponse)
+@router.patch(
+    "/hospitals/{hospital_id}",
+    response_model=HospitalResponse,
+    summary="Update own hospital profile",
+    description=(
+        "Edits the authenticated hospital's name, address, or GPS. Hospital auth "
+        "required; can only edit itself (another id → 403, unknown/inactive → 404)."
+    ),
+)
 def update_hospital(
     hospital_id: UUID,
     body: HospitalUpdate,
@@ -71,7 +97,17 @@ def update_hospital(
     return hospital
 
 
-@router.delete("/hospitals/{hospital_id}", status_code=204)
+@router.delete(
+    "/hospitals/{hospital_id}",
+    status_code=204,
+    summary="Soft-delete own hospital",
+    description=(
+        "Soft-deletes the authenticated hospital (sets is_active=False). It "
+        "disappears from the public list, but the row and all linked records "
+        "(patients, appointments) are kept for audit. Hospital auth required; "
+        "can only delete itself (another id → 403)."
+    ),
+)
 def delete_hospital(
     hospital_id: UUID,
     db: Session = Depends(get_db),

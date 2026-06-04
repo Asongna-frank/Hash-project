@@ -45,7 +45,8 @@ def get_patient_scoped(patient_id: UUID, current_user: dict, db: Session):
 
     - Patient caller: allowed only if patient.id == caller's own id.
     - Hospital caller: allowed only if patient.hospital_id == caller's hospital.
-    - Out-of-scope hospital request → 404 (not 403) to avoid ID leakage.
+    - Any out-of-scope request (other patient, other hospital's patient) → 404
+      (not 403) so the system never leaks which patient ids exist.
     - Soft-deleted patients (is_active=False) are treated as non-existent.
     """
     from app.models.patient import Patient
@@ -62,8 +63,9 @@ def get_patient_scoped(patient_id: UUID, current_user: dict, db: Session):
     caller_id = current_user.get("user_id")
 
     if caller_type == "patient":
+        # Another patient's record must look non-existent, not forbidden.
         if str(patient.id) != caller_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+            raise HTTPException(status_code=404, detail="Patient not found")
     elif caller_type == "hospital":
         if str(patient.hospital_id) != caller_id:
             raise HTTPException(status_code=404, detail="Patient not found")

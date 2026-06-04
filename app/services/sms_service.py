@@ -82,3 +82,47 @@ def get_sms_service() -> BaseSMSService:
 
 
 sms_service: BaseSMSService = get_sms_service()  # import this everywhere
+
+
+# ── INBOUND SMS (two-way) ─────────────────────────────────────────────────────
+# Twilio cannot do two-way SMS in Cameroon, so the inbound provider is UNDECIDED.
+# The SMS layer is therefore two-directional and provider-split: outbound stays
+# Twilio (above); inbound is a separate, provider-neutral abstraction so the
+# eventual receive provider (e.g. Africa's Talking) can differ from the send one.
+# Only the concrete parser is stubbed — the abstraction and webhook flow are real.
+
+@dataclass
+class InboundSMS:
+    from_phone: str                    # raw sender; normalize to E.164 before lookup
+    text: str
+    provider_message_id: str | None    # used for inbound idempotency
+
+
+class BaseInboundSMSParser(ABC):
+    @abstractmethod
+    def verify_and_parse(self, request_headers: dict, raw_body: bytes) -> InboundSMS:
+        """
+        Validate the provider's webhook signature and parse its payload into an
+        InboundSMS. Must raise on an invalid/unverified signature.
+        """
+        ...
+
+
+class StubInboundSMSParser(BaseInboundSMSParser):
+    """
+    Placeholder until the inbound SMS provider is chosen. Everything around it
+    (webhook endpoint, patient lookup, idempotency, brain dispatch, reply send)
+    is built and tested — only this adapter is missing. Provider-specific details
+    still to wire: signature header name, payload field names, and the
+    receiving number/shortcode.
+    """
+
+    def verify_and_parse(self, request_headers: dict, raw_body: bytes) -> InboundSMS:
+        raise NotImplementedError("Inbound SMS provider not yet selected")
+
+
+def get_inbound_sms_parser() -> BaseInboundSMSParser:
+    return StubInboundSMSParser()
+
+
+inbound_sms_parser: BaseInboundSMSParser = get_inbound_sms_parser()

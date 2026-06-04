@@ -16,6 +16,9 @@ from app.utils.auth import (
     hash_password,
     verify_password,
 )
+from app.utils.phone import normalize_phone, normalize_phone_or_422
+from app.services.patient_onboarding import onboard_patient
+from app.services.audit import write_audit
 from app.utils.pregnancy import compute_lmp_and_edd
 
 from datetime import datetime, timezone, date as date_type
@@ -27,14 +30,31 @@ from app.schemas.patient import PatientCreate, PatientResponse
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/hospital/signup", response_model=HospitalResponse, status_code=201)
+@router.post(
+    "/hospital/signup",
+    response_model=HospitalResponse,
+    status_code=201,
+    summary="Register a new hospital",
+    description=(
+        "Creates a hospital account plus its first personnel record in one "
+        "transaction. Public endpoint — no authentication. The hospital phone "
+        "is normalized to E.164 and becomes the hospital's unique login id; a "
+        "duplicate phone returns 400 and an invalid phone returns 422."
+    ),
+)
 def hospital_signup(
     hospital_data: HospitalCreate,
     db: Session = Depends(get_db),
 ):
     """Register a new hospital account."""
+    # Normalize phones to E.164 before any lookup or storage
+    hospital_phone = normalize_phone_or_422(hospital_data.phone, "hospital phone")
+    personnel_phone = normalize_phone_or_422(
+        hospital_data.first_personnel.phone, "personnel phone"
+    )
+
     # Check if phone already exists in hospitals table
-    existing_hospital = db.query(Hospital).filter(Hospital.phone == hospital_data.phone).first()
+    existing_hospital = db.query(Hospital).filter(Hospital.phone == hospital_phone).first()
     if existing_hospital:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -52,7 +72,7 @@ def hospital_signup(
 
     hospital = Hospital(
         name=hospital_data.name,
-        phone=hospital_data.phone,
+        phone=hospital_phone,
         hashed_password=hashed_password,
         gps_lat=hospital_data.gps_lat,
         gps_lng=hospital_data.gps_lng,
@@ -67,7 +87,7 @@ def hospital_signup(
     personnel = Personnel(
         hospital_id=hospital.id,
         name=fp.name,
-        phone=fp.phone,
+        phone=personnel_phone,
         email=fp.email,
         role=fp.role,
     )
@@ -78,14 +98,31 @@ def hospital_signup(
     return hospital
 
 
-@router.post("/hospital/login", response_model=TokenResponse)
+@router.post(
+    "/hospital/login",
+    response_model=TokenResponse,
+    summary="Hospital login",
+    description=(
+        "Authenticates a hospital by phone + password and returns a JWT. Public "
+        "endpoint. The phone is normalized before lookup, so any valid format "
+        "matches. Wrong phone or password returns a generic 401 (never reveals "
+        "whether the phone exists)."
+    ),
+)
 def hospital_login(
     login_request: LoginRequest,
     db: Session = Depends(get_db),
 ):
     """Login endpoint for hospitals. Returns JWT token."""
+    # Normalize the phone to E.164 so any valid input format matches the stored
+    # number. Invalid input falls back to raw → no match → generic 401 (rule 7).
+    try:
+        lookup_phone = normalize_phone(login_request.phone)
+    except ValueError:
+        lookup_phone = login_request.phone
+
     # Look up hospital by phone in hospitals table only
-    hospital = db.query(Hospital).filter(Hospital.phone == login_request.phone).first()
+    hospital = db.query(Hospital).filter(Hospital.phone == lookup_phone).first()
 
     # Verify password (generic error message for security)
     if not hospital or not verify_password(login_request.password, hospital.hashed_password):
@@ -109,7 +146,19 @@ def hospital_login(
     )
 
 
-@router.post("/patient/signup", response_model=PatientResponse, status_code=201)
+@router.post(
+    "/patient/signup",
+    response_model=PatientResponse,
+    status_code=201,
+    summary="Register a new smartphone patient",
+    description=(
+        "Self-registers a smartphone patient under an existing hospital. Computes "
+        "and stores LMP and EDD from weeks pregnant, runs baseline risk scoring, "
+        "and creates the initial pregnancy + risk-assessment audit records. Public "
+        "endpoint. Phone is normalized to E.164 and is the patient's unique id. "
+        "Unknown hospital → 404, duplicate phone → 400, invalid phone → 422."
+    ),
+)
 def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
 
     # 1. Validate hospital exists
@@ -117,123 +166,56 @@ def patient_signup(body: PatientCreate, db: Session = Depends(get_db)):
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
 
-    # 2. Check duplicate phone
-    existing = db.query(Patient).filter(Patient.phone == body.phone).first()
+    # 2. Normalize phone to E.164, then check duplicate
+    patient_phone = normalize_phone_or_422(body.phone, "phone")
+    existing = db.query(Patient).filter(Patient.phone == patient_phone).first()
     if existing:
         raise HTTPException(status_code=400, detail="Phone number already registered")
 
-    # 3. Compute LMP and EDD
-    from app.utils.pregnancy import compute_lmp_and_edd
-    lmp, edd = compute_lmp_and_edd(body.weeks_pregnant_at_signup)
-
-    # 4. Hash password
-    from app.utils.auth import hash_password
-    hashed = hash_password(body.password)
-
-    # 5. Derive rh_negative from blood_group
-    rh_negative = (
-        body.blood_group is not None and body.blood_group.endswith("-")
-    )
-
-    # 5. Create patient record
-    patient = Patient(
-        name=body.name,
-        phone=body.phone,
-        hashed_password=hashed,
+    # 3. Onboard via the shared service (smartphone, with a password).
+    data = {**body.model_dump(), "phone": patient_phone}
+    patient = onboard_patient(
+        db, data,
         hospital_id=body.hospital_id,
-        weeks_pregnant_at_signup=body.weeks_pregnant_at_signup,
-        lmp=lmp,
-        edd=edd,
-        age=body.age,
-        parity=body.parity,
-        language=body.language,
-        preferred_support=body.preferred_support,
-        # loss — keep boolean for back-compat, store count for v2 scoring
-        previous_loss=body.previous_loss,
-        previous_loss_count=body.previous_loss_count,
-        previous_stillbirth=body.previous_stillbirth,
-        previous_caesarean=body.previous_caesarean,
-        previous_preeclampsia=body.previous_preeclampsia,
-        has_hypertension=body.has_hypertension,
-        has_diabetes=body.has_diabetes,
-        has_sickle_cell=body.has_sickle_cell,
-        has_hiv=body.has_hiv,
-        has_severe_anaemia=body.has_severe_anaemia,
-        multiple_pregnancy=body.multiple_pregnancy,
-        late_anc_initiation=body.late_anc_initiation,
-        no_prior_anc=body.no_prior_anc,
-        # v2 collected-but-not-scored
-        gravidity=body.gravidity,
-        blood_group=body.blood_group,
-        distance_close_to_hospital=body.distance_close_to_hospital,
-        rh_negative=rh_negative,
         account_type="smartphone",
-        status="active",
+        hashed_password=hash_password(body.password),
     )
-    db.add(patient)
-    db.flush()  # get patient.id without committing
 
-    # 6. Compute risk level (v2 rubric — graded age + loss bands)
-    answers = {
-        "age":                    body.age,
-        "previous_loss_count":    body.previous_loss_count,
-        "weeks_pregnant_at_signup": body.weeks_pregnant_at_signup,
-        "parity":                 body.parity,
-        "previous_stillbirth":    body.previous_stillbirth,
-        "previous_caesarean":     body.previous_caesarean,
-        "previous_preeclampsia":  body.previous_preeclampsia,
-        "has_hypertension":       body.has_hypertension,
-        "has_diabetes":           body.has_diabetes,
-        "has_sickle_cell":        body.has_sickle_cell,
-        "has_hiv":                body.has_hiv,
-        "has_severe_anaemia":     body.has_severe_anaemia,
-        "multiple_pregnancy":     body.multiple_pregnancy,
-    }
-    result = compute_risk(answers)
-    level = result["level"]
-    score = result["score"]
-    rubric_version = result["rubric_version"]
-    breakdown = result["breakdown"]
-
-    patient.risk_level = level
-    patient.risk_level_set_at = datetime.now(timezone.utc)
-    patient.risk_level_set_by = "system"
-
-    # 7. Write RiskAssessment audit record (inputs includes breakdown for transparency)
-    risk_record = RiskAssessment(
-        patient_id=patient.id,
-        computed_by="system",
-        inputs={**answers, "_breakdown": breakdown},
-        rubric_version=rubric_version,
-        result_level=level,
-        score=score,
+    # 4. Audit: self-signup (actor is the patient herself), then one commit.
+    write_audit(
+        db, actor_type="patient", actor_id=patient.id,
+        action="patient.signup", target_type="patient", target_id=patient.id,
+        details={"account_type": "smartphone"},
     )
-    db.add(risk_record)
-
-    # 8. Create initial Pregnancy record
-    pregnancy = Pregnancy(
-        patient_id=patient.id,
-        lmp=lmp,
-        edd=edd,
-        outcome="ongoing",
-        routine_paused=False,
-    )
-    db.add(pregnancy)
-
-    # 9. Commit everything in one transaction
     db.commit()
     db.refresh(patient)
     return patient
 
 
-@router.post("/patient/login", response_model=TokenResponse)
+@router.post(
+    "/patient/login",
+    response_model=TokenResponse,
+    summary="Patient login",
+    description=(
+        "Authenticates a patient by phone + password and returns a JWT. Public "
+        "endpoint. The phone is normalized before lookup. Wrong phone or password "
+        "returns a generic 401 (never reveals whether the phone exists)."
+    ),
+)
 def patient_login(
     login_request: LoginRequest,
     db: Session = Depends(get_db),
 ):
     """Login endpoint for patients. Returns JWT token."""
+    # Normalize the phone to E.164 so any valid input format matches the stored
+    # number. Invalid input falls back to raw → no match → generic 401 (rule 7).
+    try:
+        lookup_phone = normalize_phone(login_request.phone)
+    except ValueError:
+        lookup_phone = login_request.phone
+
     # Look up patient by phone in patients table only
-    patient = db.query(Patient).filter(Patient.phone == login_request.phone).first()
+    patient = db.query(Patient).filter(Patient.phone == lookup_phone).first()
 
     # Verify password (generic error message for security)
     if not patient or not verify_password(login_request.password, patient.hashed_password):
@@ -257,7 +239,14 @@ def patient_login(
     )
 
 
-@router.get("/me")
+@router.get(
+    "/me",
+    summary="Current authenticated identity",
+    description=(
+        "Returns the caller's identity decoded from the JWT: phone, user_id, and "
+        "user_type ('hospital' or 'patient'). Requires a valid bearer token."
+    ),
+)
 def get_me(current_user: dict = Depends(get_current_user)):
     """Protected endpoint: returns current user info from JWT."""
     return {

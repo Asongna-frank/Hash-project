@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     ONESIGNAL_APP_ID: str = ""
     ONESIGNAL_REST_API_KEY: str = ""
 
+    # Default region for parsing phone numbers without a leading "+" (E.164).
+    # "CM" = Cameroon. Numbers already in +E.164 ignore this.
+    DEFAULT_PHONE_REGION: str = "CM"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

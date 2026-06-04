@@ -24,6 +24,7 @@ from app.schemas.appointment import (
 )
 from app.services.sms_service import sms_service
 from app.utils.access import require_hospital
+from app.utils.phone import normalize_phone_or_422
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -43,7 +44,19 @@ def _compose_confirmation(patient_name: str, appt: Appointment) -> str:
 
 # ── CREATE ────────────────────────────────────────────────────────────────────
 
-@router.post("", response_model=HospitalAppointmentResponse, status_code=201)
+@router.post(
+    "",
+    response_model=HospitalAppointmentResponse,
+    status_code=201,
+    summary="Create an appointment for a patient (hospital)",
+    description=(
+        "Hospital-only. Creates an appointment on behalf of one of the calling "
+        "hospital's patients, looked up by phone (normalized to E.164; invalid → "
+        "422, not-your-patient → 404). reminder_datetime is auto-set to 30 min "
+        "before the appointment. Sends an immediate confirmation SMS — the "
+        "response reports the SMS outcome, and SMS failure does not fail the call."
+    ),
+)
 def hospital_create_appointment(
     body: HospitalAppointmentCreate,
     db: Session = Depends(get_db),
@@ -60,9 +73,10 @@ def hospital_create_appointment(
     4. Send an immediate confirmation SMS. Failure is logged but does NOT
        fail the request — confirmation_sent reflects the SMS outcome.
     """
-    # 1. Resolve patient — scoped to THIS hospital
+    # 1. Resolve patient — normalize phone to E.164 first, scoped to THIS hospital
+    patient_phone = normalize_phone_or_422(body.patient_phone, "patient phone")
     patient = db.query(Patient).filter(
-        Patient.phone == body.patient_phone,
+        Patient.phone == patient_phone,
         Patient.hospital_id == caller_id,
         Patient.is_active.is_(True),
     ).first()
@@ -137,7 +151,16 @@ def hospital_create_appointment(
 
 # ── LIST ──────────────────────────────────────────────────────────────────────
 
-@router.get("", response_model=list[AppointmentResponse])
+@router.get(
+    "",
+    response_model=list[AppointmentResponse],
+    summary="List the hospital's appointments",
+    description=(
+        "Hospital-only. Returns all active (non-deleted) appointments for the "
+        "calling hospital's patients, soonest first. Pass ?upcoming_only=true to "
+        "exclude past appointments."
+    ),
+)
 def hospital_list_appointments(
     db: Session = Depends(get_db),
     caller_id: str = Depends(require_hospital),
@@ -156,7 +179,15 @@ def hospital_list_appointments(
 
 # ── PATCH ─────────────────────────────────────────────────────────────────────
 
-@router.patch("/{appointment_id}", response_model=AppointmentResponse)
+@router.patch(
+    "/{appointment_id}",
+    response_model=AppointmentResponse,
+    summary="Edit an appointment (hospital)",
+    description=(
+        "Hospital-only. Edits title, notes, or datetimes of an appointment the "
+        "calling hospital owns (else 404). Future-datetime validation applies."
+    ),
+)
 def hospital_update_appointment(
     appointment_id: UUID,
     body: AppointmentUpdate,
@@ -181,7 +212,15 @@ def hospital_update_appointment(
 
 # ── DELETE ────────────────────────────────────────────────────────────────────
 
-@router.delete("/{appointment_id}", status_code=204)
+@router.delete(
+    "/{appointment_id}",
+    status_code=204,
+    summary="Soft-delete an appointment (hospital)",
+    description=(
+        "Hospital-only. Soft-deletes an appointment the calling hospital owns "
+        "(is_deleted=True; never hard-deleted). Unknown/not-owned → 404."
+    ),
+)
 def hospital_delete_appointment(
     appointment_id: UUID,
     db: Session = Depends(get_db),

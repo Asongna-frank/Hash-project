@@ -24,6 +24,7 @@ groq==1.4.0            # LLM provider (local dev)
 httpx==0.28.1          # HTTP client (groq transport)
 twilio                 # SMS provider (choronko track)
 APScheduler==3.11.2    # appointment reminder scheduler
+phonenumbers           # E.164 phone normalization/validation
 
 # --- Testing ---
 freezegun              # deterministic datetime in tests

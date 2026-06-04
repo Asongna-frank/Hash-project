@@ -23,7 +23,18 @@ logger = logging.getLogger(__name__)
 
 # ── Patient-created appointments ──────────────────────────────────────────────
 
-@router.post("", response_model=AppointmentResponse, status_code=201)
+@router.post(
+    "",
+    response_model=AppointmentResponse,
+    status_code=201,
+    summary="Book an appointment (patient)",
+    description=(
+        "Patient-only. Books an appointment; the hospital is taken from the "
+        "patient's own record (never submitted). reminder_datetime is "
+        "patient-supplied and must be in the future and on or before the "
+        "appointment (else 422). No confirmation SMS is sent for patient bookings."
+    ),
+)
 def create_appointment(
     body: AppointmentCreate,
     db: Session = Depends(get_db),
@@ -58,7 +69,16 @@ def create_appointment(
     return appointment
 
 
-@router.get("", response_model=list[AppointmentResponse])
+@router.get(
+    "",
+    response_model=list[AppointmentResponse],
+    summary="List appointments",
+    description=(
+        "Lists appointments, soonest first. A patient sees only their own; a "
+        "hospital sees all of its own. Soft-deleted rows are never returned. "
+        "Pass ?upcoming_only=true to exclude past appointments."
+    ),
+)
 def list_appointments(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -85,7 +105,16 @@ def list_appointments(
     return query.order_by(Appointment.appointment_datetime.asc()).all()
 
 
-@router.delete("/{appointment_id}", status_code=200)
+@router.delete(
+    "/{appointment_id}",
+    status_code=200,
+    summary="Soft-delete one appointment",
+    description=(
+        "Soft-deletes a single appointment (is_deleted=True; never hard-deleted). "
+        "Access-controlled per record: a patient must own it, a hospital must own "
+        "it (else 403). Unknown/already-deleted → 404."
+    ),
+)
 def delete_appointment(
     appointment_id: UUID,
     db: Session = Depends(get_db),
@@ -111,7 +140,16 @@ def delete_appointment(
     return {"deleted": True, "id": str(appointment_id)}
 
 
-@router.delete("", status_code=200)
+@router.delete(
+    "",
+    status_code=200,
+    summary="Bulk soft-delete appointments",
+    description=(
+        "Soft-deletes many appointments by id in one call. Each id is "
+        "access-checked individually; the response reports which were deleted, "
+        "not found, or access-denied."
+    ),
+)
 def delete_appointments_bulk(
     body: AppointmentDeleteRequest,
     db: Session = Depends(get_db),

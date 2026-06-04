@@ -20,7 +20,9 @@ class Patient(Base):
     # Patient identification
     name = Column(String, nullable=False)
     phone = Column(String, unique=True, nullable=False, index=True)
-    hashed_password = Column(String, nullable=False)
+    # Nullable: choronko (SMS) patients are created hospital-side and never log
+    # in, so they have no password. Smartphone patients always set one at signup.
+    hashed_password = Column(String, nullable=True)
 
     # Hospital link
     hospital_id = Column(UUID(as_uuid=True), ForeignKey("hospitals.id"), nullable=False)

@@ -33,6 +33,19 @@ class Message(Base):
     # null for outbound messages
     # "low" | "medium" | "high" for inbound messages
 
+    # Multilingual pivot: the language the patient actually wrote in. `content`
+    # is always stored in English (the brain's pivot language); source_lang
+    # records the original so clinicians know what was sent. null/"en" = English.
+    source_lang = Column(String, nullable=True)
+
+    # Inbound SMS idempotency: the provider's unique message id. Lets the webhook
+    # detect and drop duplicate deliveries. null for app-channel messages.
+    provider_message_id = Column(String, nullable=True, index=True)
+
+    # Set True when translate-IN failed and triage ran on the untranslated text —
+    # surfaces the message for clinician review instead of silently dropping it.
+    flagged_for_review = Column(Boolean, nullable=False, default=False)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     is_read = Column(Boolean, default=False, nullable=False)

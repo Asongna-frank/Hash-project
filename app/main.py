@@ -9,9 +9,12 @@ from app.core.database import Base, engine
 from app.routers import auth, hospitals, patients, chat, appointments, notifications, tips
 from app.routers import personnel as personnel_router
 from app.routers import hospital_appointments
+from app.routers import hospital_patients
+from app.routers import sms as sms_router
 from app.models import message  # noqa — ensures table is registered with Base
 from app.models import appointment as appointment_model  # noqa — registers appointments table
 from app.models import personnel as personnel_model    # noqa — registers personnel table
+from app.models import audit_log as audit_log_model    # noqa — registers audit_logs table
 from app.services.scheduler import scheduler
 
 logger = logging.getLogger(__name__)
@@ -54,7 +57,11 @@ def shutdown_event():
         scheduler.shutdown()
 
 
-@app.get("/")
+@app.get(
+    "/",
+    summary="API health check",
+    description="Public liveness probe. Returns a simple ok status when the API is running.",
+)
 def root():
     return {"status": "ok", "message": "HASH API is running"}
 
@@ -68,6 +75,10 @@ app.include_router(appointments.router,  prefix="/appointments",          tags=[
 app.include_router(hospital_appointments.router,
                    prefix="/hospital/appointments",
                    tags=["hospital-appointments"])
+app.include_router(hospital_patients.router,
+                   prefix="/hospital/patients",
+                   tags=["hospital-patients"])
 app.include_router(notifications.router, prefix="/notifications",         tags=["notifications"])
 app.include_router(tips.router)
 app.include_router(personnel_router.router)
+app.include_router(sms_router.router,    prefix="/sms",                   tags=["sms"])
