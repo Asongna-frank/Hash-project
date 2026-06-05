@@ -280,6 +280,11 @@ class PatientResponse(BaseModel):
     status: str = Field(..., examples=["active"])
     is_active: bool = Field(..., examples=[True])
 
+    # Messaging opt-out state (PAUSE/STOP/RESUME keywords) — lets the app show
+    # a "messages paused" banner and a resume control.
+    opt_out_status: Optional[str] = Field(default=None, examples=[None])  # null|paused|stopped
+    paused_until: Optional[datetime] = Field(default=None, examples=[None])
+
     # Missed check-in tracking (used by clinician dashboard)
     consecutive_missed_checkins: int = Field(..., examples=[0])
     missed_checkin_flag: bool = Field(..., examples=[False])
