@@ -2,7 +2,7 @@
 from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class PregnancyResponse(BaseModel):
@@ -14,6 +14,7 @@ class PregnancyResponse(BaseModel):
                 "patient_id": "7c1e9b40-2a3d-4f81-9c6a-1b2c3d4e5f60",
                 "lmp": "2026-03-15",
                 "edd": "2026-12-20",
+                "current_ga_weeks": 11,
                 "outcome": "ongoing",
                 "loss_date": None,
                 "ga_at_loss": None,
@@ -32,3 +33,13 @@ class PregnancyResponse(BaseModel):
     ga_at_loss: Optional[int] = Field(default=None, examples=[None])
     routine_paused: bool = Field(..., examples=[False])
     created_at: datetime = Field(..., examples=["2026-06-04T10:30:00+01:00"])
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def current_ga_weeks(self) -> Optional[int]:
+        """Gestational age in completed weeks, computed from LMP at read time.
+        Frozen at ga_at_loss once the pregnancy ends in a loss; None pre-LMP."""
+        if self.outcome == "loss":
+            return self.ga_at_loss
+        days = (date.today() - self.lmp).days
+        return days // 7 if days >= 0 else None

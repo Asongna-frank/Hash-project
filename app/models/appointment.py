@@ -18,6 +18,10 @@ class Appointment(Base):
     title = Column(String, nullable=False)
     notes = Column(Text, nullable=True)
 
+    # Optional: the doctor/midwife the visit is with — shown on the app's
+    # "Upcoming Visit" card (e.g. "Dr. Ategha Tsili").
+    doctor_name = Column(String, nullable=True)
+
     appointment_datetime = Column(DateTime(timezone=True), nullable=False)
 
     # The moment the patient/clinician wants to be reminded.

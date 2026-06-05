@@ -13,6 +13,17 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"
     GROQ_API_KEY: str = ""
 
+    # OpenAI — chat LLM (LLM_PROVIDER=openai) + voice notes (Whisper STT + TTS).
+    OPENAI_API_KEY: str = ""
+    OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
+    OPENAI_STT_MODEL: str = "whisper-1"
+    OPENAI_TTS_MODEL: str = "gpt-4o-mini-tts"
+    OPENAI_TTS_VOICE: str = "nova"  # warm voice — fits the maternal-care context
+
+    # Realtime API (live voice conversation) — ephemeral keys minted server-side.
+    OPENAI_REALTIME_MODEL: str = "gpt-realtime"
+    OPENAI_REALTIME_VOICE: str = "marin"
+
     # Twilio SMS (choronko track).
     # Add these to .env:
     #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

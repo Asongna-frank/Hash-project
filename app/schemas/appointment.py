@@ -10,6 +10,7 @@ class AppointmentCreate(BaseModel):
     """Patient-created appointment — patient supplies reminder_datetime directly."""
     title: str = Field(..., min_length=2, max_length=200, examples=["Antenatal check-up"])
     notes: Optional[str] = Field(default=None, examples=["Bring previous scan results and ID card."])
+    doctor_name: Optional[str] = Field(default=None, max_length=120, examples=["Dr. Ategha Tsili"])
     appointment_datetime: datetime = Field(
         ..., examples=["2026-07-15T09:00:00+01:00"],
         description="ISO 8601 with timezone, e.g. 2026-07-15T09:00:00+01:00",
@@ -60,6 +61,7 @@ class HospitalAppointmentCreate(BaseModel):
                                description="E.164 phone of the patient")
     title: str = Field(..., min_length=2, max_length=200, examples=["Growth scan (28 weeks)"])
     notes: Optional[str] = Field(default=None, examples=["Fasting not required."])
+    doctor_name: Optional[str] = Field(default=None, max_length=120, examples=["Dr. Ategha Tsili"])
     appointment_datetime: datetime = Field(
         ..., examples=["2026-07-20T11:30:00+01:00"], description="ISO 8601 with timezone"
     )
@@ -129,6 +131,7 @@ _APPOINTMENT_EXAMPLE = {
     "hospital_id": "4f996b23-92d3-4587-857b-038903d4253d",
     "title": "Antenatal check-up",
     "notes": "Bring previous scan results and ID card.",
+    "doctor_name": "Dr. Ategha Tsili",
     "appointment_datetime": "2026-07-15T09:00:00+01:00",
     "reminder_datetime": "2026-07-15T08:00:00+01:00",
     "created_by": "patient",
@@ -151,6 +154,7 @@ class AppointmentResponse(BaseModel):
     hospital_id: UUID = Field(..., examples=["4f996b23-92d3-4587-857b-038903d4253d"])
     title: str = Field(..., examples=["Antenatal check-up"])
     notes: Optional[str] = Field(default=None, examples=["Bring previous scan results and ID card."])
+    doctor_name: Optional[str] = Field(default=None, examples=["Dr. Ategha Tsili"])
     appointment_datetime: datetime = Field(..., examples=["2026-07-15T09:00:00+01:00"])
     reminder_datetime: datetime = Field(..., examples=["2026-07-15T08:00:00+01:00"])
     created_by: str = Field(..., examples=["patient"])  # "patient" | "hospital"

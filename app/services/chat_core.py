@@ -27,14 +27,14 @@ from datetime import date, datetime, timezone, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.core.risk_config import RUBRIC_VERSION
 from app.models.patient import Patient
 from app.models.pregnancy import Pregnancy
-from app.models.risk_assessment import RiskAssessment
 from app.services import content_store
+from app.services.alert_service import create_alert
 from app.services.conversation import generate_reply
 from app.services.loss_detection import detect_loss
 from app.services.message_store import save_inbound, save_outbound
+from app.services.red_flags import is_crisis_signal, match_red_flags
 from app.services.translation_service import translation_service
 
 logger = logging.getLogger(__name__)
@@ -109,13 +109,14 @@ def _pivot_out(patient: Patient, english_text: str) -> str:
         return english_text
 
 
-def _alert_hospital(patient: Patient, db: Session, reason: str) -> None:
-    """
-    M6 hospital-alert hook. Real-time dashboard alerting is implemented in M6;
-    for now this records the alert so the wiring point is explicit and testable.
-    """
-    logger.warning("HOSPITAL ALERT | patient=%s | reason=%s", patient.id, reason)
-    # TODO M6: push a real-time alert to the hospital dashboard.
+def _alert_hospital(patient: Patient, db: Session, reason: str,
+                    source: str = "message_triage") -> None:
+    """M6 hospital alert: persist + real-time dashboard push + hospital SMS."""
+    try:
+        create_alert(db, patient=patient, source=source, reason=reason,
+                     triage_level="high")
+    except Exception:  # noqa: BLE001 — alerting failure must never break the reply
+        logger.exception("Alert fan-out failed | patient=%s | %s", patient.id, reason)
 
 
 def _handle_opt_out(patient: Patient, keyword: str, channel: str, db: Session) -> ChatReply:
@@ -141,44 +142,31 @@ def _handle_opt_out(patient: Patient, keyword: str, channel: str, db: Session) -
     return ChatReply(text=reply, channel=channel, triage_level="low")
 
 
-def _handle_loss_confirmed(patient: Patient, pregnancy: Pregnancy | None,
+def _handle_loss_suspected(patient: Patient, pregnancy: Pregnancy | None,
                            channel: str, db: Session) -> ChatReply:
     """
-    CRISIS carve-out. Apply post-loss state, raise the hospital alert, and reply
-    with the PRE-APPROVED stored crisis message in the patient's language
-    (never live-translated). Returns is_crisis=True.
+    CRISIS carve-out — SRS-compliant version.
+
+    The patient has clearly reported a pregnancy loss in chat. Per the SRS hard
+    rule ("the system never infers a loss from chat messages alone"), we do NOT
+    activate the post-loss track here. Instead we:
+      1. Raise a High alert so a clinician reviews and, if confirmed, marks the
+         loss on the dashboard (which is what activates M9 via post_loss.py).
+      2. Reply immediately with the PRE-APPROVED supportive message in the
+         patient's language (never live-translated) — she is not left waiting
+         on a clinician for warmth.
     """
-    current_ga_weeks = (date.today() - patient.lmp).days // 7
-
-    patient.status = "post_loss"
     patient.pending_loss_confirmation = False
-
-    if pregnancy:
-        pregnancy.outcome = "loss"
-        pregnancy.loss_date = date.today()
-        pregnancy.ga_at_loss = current_ga_weeks
-        pregnancy.routine_paused = True
-
-    if patient.risk_level != "high":
-        patient.risk_level = "high"
-        patient.risk_level_set_at = datetime.now(timezone.utc)
-        patient.risk_level_set_by = "system"
-        db.add(RiskAssessment(
-            patient_id=patient.id,
-            computed_by="system",
-            inputs={
-                "reason": "Automatic escalation on confirmed pregnancy loss",
-                "loss_confirmed": True,
-            },
-            rubric_version=RUBRIC_VERSION,
-            result_level="high",
-            score=None,
-        ))
-
     db.commit()
-    logger.info("Pregnancy loss confirmed | patient=%s | status -> post_loss", patient.id)
+    logger.info("Pregnancy loss SUSPECTED from chat | patient=%s — flagged for clinician",
+                patient.id)
 
-    _alert_hospital(patient, db, reason="confirmed pregnancy loss")
+    _alert_hospital(
+        patient, db,
+        reason="Patient reported a pregnancy loss in chat — please review and "
+               "confirm the outcome on her record",
+        source="message_triage",
+    )
 
     # Pre-approved, stored per language — NOT live-translated.
     reply = content_store.get_content("post_loss_opening", _patient_lang(patient))
@@ -245,9 +233,15 @@ def process_message(
 
     pregnancy = _get_pregnancy(patient.id, db)
 
+    # Deterministic red-flag layer (SRS M4) — runs on the English pivot, always
+    # wins over the LLM classifier, and works even if the LLM is unreachable.
+    red_flags = match_red_flags(english_text)
+
     # STEP 3 — post-loss track (same engine, post-loss mode; M9 extends this)
     if patient.status == "post_loss":
         reply_en, triage = generate_reply(patient, english_text, db)
+        if red_flags:
+            triage = "high"
         in_msg.triage_level = triage
         db.add(in_msg)
         reply_local = _pivot_out(patient, reply_en)
@@ -255,6 +249,14 @@ def process_message(
                                 source_lang=_patient_lang(patient))
         db.add(out_msg)
         db.commit()
+        if triage == "high":
+            _alert_hospital(
+                patient, db,
+                reason=("Post-loss crisis signal (self-harm language)"
+                        if is_crisis_signal(red_flags)
+                        else "High-acuity post-loss message"),
+                source="post_loss_crisis",
+            )
         return ChatReply(text=reply_local, channel=channel, triage_level=triage,
                          loss_detected=True)
 
@@ -264,7 +266,7 @@ def process_message(
             in_msg.triage_level = "high"
             db.add(in_msg)
             db.commit()
-            return _handle_loss_confirmed(patient, pregnancy, channel, db)
+            return _handle_loss_suspected(patient, pregnancy, channel, db)
         elif any(n in english_text.lower() for n in _NEGATIVE):
             patient.pending_loss_confirmation = False
             db.commit()
@@ -275,7 +277,7 @@ def process_message(
                 in_msg.triage_level = "high"
                 db.add(in_msg)
                 db.commit()
-                return _handle_loss_confirmed(patient, pregnancy, channel, db)
+                return _handle_loss_suspected(patient, pregnancy, channel, db)
             if result == "AMBIGUOUS":
                 return _ambiguous_reply(patient, in_msg, channel, db)
             patient.pending_loss_confirmation = False
@@ -287,7 +289,7 @@ def process_message(
         in_msg.triage_level = "high"
         db.add(in_msg)
         db.commit()
-        return _handle_loss_confirmed(patient, pregnancy, channel, db)
+        return _handle_loss_suspected(patient, pregnancy, channel, db)
     if loss_result == "AMBIGUOUS":
         patient.pending_loss_confirmation = True
         db.commit()
@@ -295,6 +297,9 @@ def process_message(
 
     # STEP 6 — normal conversation + triage (NOT_A_LOSS path)
     reply_en, triage = generate_reply(patient, english_text, db)
+    if red_flags:
+        # Red flags always win — conservative over-triage by design (SRS M4).
+        triage = "high"
     in_msg.triage_level = triage
     db.add(in_msg)
 
@@ -307,9 +312,15 @@ def process_message(
     # High-acuity message → alert hospital (M6). The reply itself is the empathetic
     # translated LLM reply (which already tells danger-sign patients to go to
     # hospital); is_crisis stays False — that flag is reserved for the stored
-    # pre-approved crisis message (confirmed loss).
+    # pre-approved crisis message (suspected/confirmed loss).
     if triage == "high":
-        _alert_hospital(patient, db, reason="high-acuity chat message")
+        if red_flags:
+            reason = f"Red-flag message: \"{', '.join(red_flags[:3])}\""
+            if is_crisis_signal(red_flags):
+                reason = "CRISIS — self-harm language detected"
+        else:
+            reason = "High-acuity chat message"
+        _alert_hospital(patient, db, reason=reason)
 
     return ChatReply(text=reply_local, channel=channel, triage_level=triage,
                      loss_detected=False)

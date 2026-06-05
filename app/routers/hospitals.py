@@ -42,6 +42,32 @@ def list_hospitals(
 
 
 @router.get(
+    "/hospitals/{hospital_id}/public",
+    response_model=HospitalPublic,
+    summary="Get one hospital (public)",
+    description=(
+        "Public, unauthenticated lookup of a single active hospital — used by "
+        "the patient app to show the hospital name/location chip without "
+        "fetching the whole list. Returns only id, name, address, and GPS. "
+        "Unknown or inactive hospital → 404."
+    ),
+)
+def get_hospital_public(
+    hospital_id: UUID,
+    db: Session = Depends(get_db),
+):
+    """Public single-hospital view (same fields as the public list)."""
+    hospital = (
+        db.query(Hospital)
+        .filter(Hospital.id == hospital_id, Hospital.is_active.is_(True))
+        .first()
+    )
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    return hospital
+
+
+@router.get(
     "/hospitals/{hospital_id}",
     response_model=HospitalResponse,
     summary="Get own hospital profile",

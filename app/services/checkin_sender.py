@@ -154,6 +154,19 @@ def _update_missed_counter(patient: Patient, db: Session) -> None:
                 patient.risk_level,
                 patient.consecutive_missed_checkins,
             )
+            # M6: surface the escalation on the dashboard alert pane (SRS
+            # source "missed_checkins"). Medium urgency — outreach, not 911.
+            try:
+                from app.services.alert_service import create_alert
+                create_alert(
+                    db, patient=patient, source="missed_checkins",
+                    triage_level="medium",
+                    reason=(f"{patient.consecutive_missed_checkins} consecutive "
+                            f"missed check-ins ({patient.risk_level or 'medium'}-risk "
+                            "patient) — consider outreach"),
+                )
+            except Exception:  # noqa: BLE001 — alerting must never break the send loop
+                logger.exception("Missed-checkin alert failed | patient=%s", patient.id)
 
 
 # ── public entry point ────────────────────────────────────────────────────────

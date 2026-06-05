@@ -95,6 +95,7 @@ def hospital_create_appointment(
         hospital_id=patient.hospital_id,
         title=body.title,
         notes=body.notes,
+        doctor_name=body.doctor_name,
         appointment_datetime=body.appointment_datetime,
         reminder_datetime=reminder_dt,
         created_by="hospital",

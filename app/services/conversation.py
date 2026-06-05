@@ -4,6 +4,7 @@ calls LLM, returns reply and triage level.
 """
 
 import json
+import re
 import logging
 from datetime import date
 
@@ -117,7 +118,10 @@ Patient context:
 Recent conversation history:
 {history}
 
-Return ONLY valid JSON in this exact format — no explanation, no markdown, no code block:
+CRITICAL OUTPUT RULE: Your ENTIRE output must be a single JSON object and
+nothing else — your first character must be {{ and your last character must
+be }}. Never write the reply text outside the JSON. No explanation, no
+markdown, no code block. Exact format:
 {{"reply": "your response to the patient here", "triage_level": "low or medium or high"}}"""
 
 
@@ -128,8 +132,21 @@ def _parse_llm_response(raw: str) -> tuple[str, str]:
     """
     try:
         # Strip any accidental markdown fences the model may add
-        cleaned = raw.strip().strip("```json").strip("```").strip()
-        parsed = json.loads(cleaned)
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1]
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:]
+            cleaned = cleaned.strip()
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Model wrote text around the JSON (e.g. the reply first, then the
+            # object). Extract the outermost {...} block and parse that.
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                raise
+            parsed = json.loads(match.group(0))
 
         reply = str(parsed.get("reply", FALLBACK_REPLY)).strip()
         triage = str(parsed.get("triage_level", FALLBACK_TRIAGE)).lower().strip()
@@ -172,10 +189,15 @@ def generate_reply(
     history = _fetch_history(patient.id, db)
     system_prompt = _build_system_prompt(patient_context, history)
 
-    raw = llm_service.classify_message(
-        message=inbound_message,
-        system_prompt=system_prompt,
-    )
+    try:
+        raw = llm_service.classify_message(
+            message=inbound_message,
+            system_prompt=system_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 — LLM outage must never crash the chat.
+        # Deterministic red flags (chat_core) still force HIGH + alert without the LLM.
+        logger.error("LLM call failed — using fallback reply: %s", exc)
+        return FALLBACK_REPLY, FALLBACK_TRIAGE
 
     reply, triage_level = _parse_llm_response(raw)
 
