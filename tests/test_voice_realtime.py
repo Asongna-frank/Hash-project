@@ -232,3 +232,76 @@ def test_realtime_endpoints_reject_hospital_token():
     assert client.post("/chat/realtime/transcript",
                        headers={"Authorization": f"Bearer {htok}"},
                        json={"text": "x"}).status_code == 403
+
+
+# ── POST /chat/image ──────────────────────────────────────────────────────────
+
+def _image_db(patient):
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = patient
+    app.dependency_overrides[get_db] = lambda: db
+    return db
+
+
+def test_image_message_full_flow():
+    patient = make_patient()
+    _image_db(patient)
+    vision = {"summary": "A plate of rice with vegetables and fish",
+              "reply": "That looks like a balanced meal, Maria!",
+              "triage_level": "low"}
+    try:
+        with patch.object(chat_router, "analyze_image", return_value=vision), \
+             patch.object(chat_router, "save_inbound", return_value=MagicMock()), \
+             patch.object(chat_router, "save_outbound", return_value=MagicMock()), \
+             patch.object(chat_router, "create_alert") as mock_alert:
+            resp = client.post(
+                "/chat/image",
+                headers={"Authorization": f"Bearer {patient_token(str(patient.id))}"},
+                files={"image": ("meal.jpg", b"fake-jpeg-bytes", "image/jpeg")},
+                data={"caption": "is this good for the baby?"},
+            )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["reply"].startswith("That looks like a balanced meal")
+    assert body["triage_level"] == "low"
+    mock_alert.assert_not_called()
+
+
+def test_image_red_flag_in_summary_forces_high_and_alerts():
+    patient = make_patient()
+    _image_db(patient)
+    vision = {"summary": "Photo shows heavy bleeding on a cloth",
+              "reply": "Please go to your hospital immediately.",
+              "triage_level": "medium"}  # model under-triaged — red flag must win
+    try:
+        with patch.object(chat_router, "analyze_image", return_value=vision), \
+             patch.object(chat_router, "save_inbound", return_value=MagicMock()), \
+             patch.object(chat_router, "save_outbound", return_value=MagicMock()), \
+             patch.object(chat_router, "create_alert") as mock_alert:
+            resp = client.post(
+                "/chat/image",
+                headers={"Authorization": f"Bearer {patient_token(str(patient.id))}"},
+                files={"image": ("photo.png", b"fake-png", "image/png")},
+            )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 200
+    assert resp.json()["triage_level"] == "high"
+    mock_alert.assert_called_once()
+    assert "bleeding" in mock_alert.call_args.kwargs["reason"]
+
+
+def test_image_bad_format_422():
+    patient = make_patient()
+    _image_db(patient)
+    try:
+        resp = client.post(
+            "/chat/image",
+            headers={"Authorization": f"Bearer {patient_token(str(patient.id))}"},
+            files={"image": ("doc.pdf", b"%PDF", "application/pdf")},
+        )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 422

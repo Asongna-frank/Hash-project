@@ -25,6 +25,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     UploadFile,
@@ -43,7 +44,7 @@ from app.models.patient import Patient
 from app.schemas.common import ChatMessageRequest, ChatMessageResponse
 from app.services.chat_core import process_message
 from app.services.alert_service import create_alert
-from app.services.message_store import save_inbound
+from app.services.message_store import save_inbound, save_outbound
 from app.services.red_flags import is_crisis_signal, match_red_flags
 from app.services.voice_service import (
     MAX_AUDIO_BYTES,
@@ -51,6 +52,12 @@ from app.services.voice_service import (
     VoiceServiceError,
     synthesize_speech,
     transcribe_audio,
+)
+from app.services.vision_service import (
+    MAX_IMAGE_BYTES,
+    SUPPORTED_IMAGE_TYPES,
+    VisionServiceError,
+    analyze_image,
 )
 from app.utils.access import require_patient
 
@@ -605,3 +612,91 @@ def log_realtime_transcript(
             logger.exception("Realtime transcript alert failed | patient=%s", patient.id)
 
     return {"stored": True, "triage_level": triage, "red_flags": flags}
+
+
+# ── Image messages (vision) ───────────────────────────────────────────────────
+
+@router.post(
+    "/image",
+    summary="Send a photo to the chatbot (app channel)",
+    description=(
+        "Patient-only. Upload a photo (multipart field `image`: jpg/png/webp/"
+        "gif, ≤10MB) with an optional `caption` form field. The vision model "
+        "explains medication packages and hospital documents, gives nutrition "
+        "feedback on meals, and conservatively assesses possible symptoms — "
+        "never prescribing or dosing. The image summary + caption pass through "
+        "the deterministic red-flag layer, and a high triage (from the model "
+        "OR a red flag) alerts the hospital exactly like a text message. Both "
+        "sides are stored in the conversation history."
+    ),
+)
+async def image_message(
+    image: UploadFile = File(...),
+    caption: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+    patient_id: str = Depends(require_patient),
+):
+    patient = _get_patient(patient_id, db)
+
+    ext = (image.filename or "photo.jpg").rsplit(".", 1)[-1].lower()
+    if ext not in SUPPORTED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported image format '{ext}' — use one of {sorted(SUPPORTED_IMAGE_TYPES)}",
+        )
+    image_bytes = await image.read()
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=422, detail="Image too large (max 10MB)")
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="Empty image file")
+
+    weeks = None
+    if getattr(patient, "lmp", None):
+        weeks = max((date.today() - patient.lmp).days // 7, 0)
+    lang = (getattr(patient, "language", None) or "en").lower()
+
+    try:
+        result = await run_in_threadpool(
+            lambda: analyze_image(
+                image_bytes, ext, caption,
+                patient_name=patient.name, weeks=weeks, language=lang,
+                post_loss=(patient.status == "post_loss"),
+            )
+        )
+    except VisionServiceError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # Deterministic red flags on what the image shows + what she wrote —
+    # always wins over the model's own triage (same rule as text chat).
+    flag_text = f"{result['summary']} {caption or ''}"
+    flags = match_red_flags(flag_text)
+    triage = "high" if flags else result["triage_level"]
+
+    # Store both sides in the conversation history (English pivot for inbound).
+    in_msg = save_inbound(
+        patient.id, f"[photo] {result['summary']}" + (f' — "{caption.strip()}"' if caption and caption.strip() else ""),
+        triage_level=triage, channel="app", source_lang=lang,
+    )
+    db.add(in_msg)
+    out_msg = save_outbound(patient.id, result["reply"], channel="app", source_lang=lang)
+    db.add(out_msg)
+    db.commit()
+
+    if triage == "high":
+        try:
+            create_alert(
+                db, patient=patient,
+                source="post_loss_crisis" if (patient.status == "post_loss" and is_crisis_signal(flags)) else "message_triage",
+                reason=(f"Red-flag in photo message: \"{', '.join(flags[:3])}\"" if flags
+                        else f"High-acuity photo: {result['summary'][:120]}"),
+                triage_level="high",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Image alert failed | patient=%s", patient.id)
+
+    return {
+        "summary": result["summary"],
+        "reply": result["reply"],
+        "triage_level": triage,
+        "red_flags": flags,
+    }
