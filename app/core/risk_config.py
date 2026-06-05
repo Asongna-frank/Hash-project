@@ -50,9 +50,9 @@ RISK_THRESHOLDS: dict[str, int] = {
 # Proactive check-in cadence in DAYS, keyed by risk level.
 # High ≈ 2× Medium frequency (7÷2 = 3.5 → 3, erring toward more contact).
 CHECK_IN_CADENCE_DAYS: dict[str, int] = {
-    "high":   3,
-    "medium": 7,
-    "low":    14,
+    "high":   1,   # daily — per SRS acceptance criteria (was 3, pre-SRS value)
+    "medium": 7,   # weekly
+    "low":    14,  # fortnightly (+ milestone-week overrides in checkin_sender)
 }
 
 # Consecutive missed check-ins (no patient reply before next check-in) that

@@ -37,8 +37,10 @@ router = APIRouter()
     summary="List the hospital's patients",
     description=(
         "Hospital-only. Returns the calling hospital's active patients with name, "
-        "phone, age, status, and current gestational age in weeks. Patients cannot "
-        "call this (403)."
+        "phone, age, status, current GA weeks, risk_level, missed_checkin_flag, "
+        "account_type (smartphone | choronko) and last_activity (latest message "
+        "timestamp) — everything the dashboard list needs for sorting by risk "
+        "and activity. Patients cannot call this (403)."
     ),
 )
 def list_patients(
@@ -55,6 +57,20 @@ def list_patients(
         .filter(Patient.hospital_id == caller_id, Patient.is_active.is_(True))
         .all()
     )
+
+    # Latest message per patient (either direction) in ONE grouped query —
+    # powers the dashboard's "sort by last activity".
+    from sqlalchemy import func as sa_func
+    from app.models.message import Message
+    activity_rows = (
+        db.query(Message.patient_id, sa_func.max(Message.created_at))
+        .join(Patient, Patient.id == Message.patient_id)
+        .filter(Patient.hospital_id == caller_id)
+        .group_by(Message.patient_id)
+        .all()
+    )
+    last_activity = {pid: ts for pid, ts in activity_rows}
+
     today = date.today()
     return [
         PatientListItem(
@@ -64,6 +80,10 @@ def list_patients(
             age=p.age,
             status=p.status or "active",
             current_ga_weeks=(today - p.lmp).days // 7 if p.lmp else None,
+            risk_level=p.risk_level,
+            missed_checkin_flag=bool(p.missed_checkin_flag),
+            account_type=p.account_type or "smartphone",
+            last_activity=last_activity.get(p.id),
         )
         for p in patients
     ]

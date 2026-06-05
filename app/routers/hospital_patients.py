@@ -162,3 +162,184 @@ def mark_pregnancy_outcome(
     logger.info("Pregnancy outcome marked | hospital=%s | patient=%s | outcome=%s",
                 caller_hospital_id, patient.id, body.outcome)
     return patient
+
+
+# ── Clinician conversation view ───────────────────────────────────────────────
+
+@router.get(
+    "/{patient_id}/messages",
+    summary="Patient conversation history (clinician view)",
+    description=(
+        "Hospital-only, own patients only (others → 404). Returns the patient's "
+        "full message history newest-first with pagination (?skip=&limit=, max "
+        "200). Each item carries direction (in=patient, out=bot), message_type "
+        "(chat/checkin/tip/reminder/crisis), triage_level (inbound only), "
+        "source_lang (the language the patient wrote in — content is stored as "
+        "the English pivot), and flagged_for_review (translation failed — "
+        "clinician should read the original). Use this on the per-patient "
+        "dashboard page and when reviewing a suspected-loss or red-flag alert."
+    ),
+)
+def patient_conversation(
+    patient_id: UUID,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from app.models.message import Message
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    limit = min(max(limit, 1), 200)
+    q = (
+        db.query(Message)
+        .filter(Message.patient_id == patient.id)
+        .order_by(Message.created_at.desc())
+    )
+    total = q.count()
+    rows = q.offset(skip).limit(limit).all()
+
+    return {
+        "total": total,
+        "has_more": skip + len(rows) < total,
+        "items": [
+            {
+                "id": str(m.id),
+                "direction": m.direction,
+                "channel": m.channel,
+                "content": m.content,
+                "message_type": m.message_type,
+                "triage_level": m.triage_level,
+                "source_lang": m.source_lang,
+                "flagged_for_review": m.flagged_for_review,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in rows
+        ],
+    }
+
+
+# ── Condition graph (green → yellow → red) ────────────────────────────────────
+
+_BAND_BY_TRIAGE = {"high": "red", "medium": "yellow", "low": "green", None: "green"}
+_TRIAGE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+@router.get(
+    "/{patient_id}/condition-graph",
+    summary="Condition graph data (green/yellow/red timeline)",
+    description=(
+        "Hospital-only, own patients only (others → 404). Daily time series for "
+        "the per-patient condition graph: each point has the day's worst inbound "
+        "triage level, the resulting colour band (high→red, medium→yellow, else "
+        "green), message count, and GA week. Overlay `events` marks risk-level "
+        "changes, appointments, and pregnancy outcome on the timeline. Window "
+        "defaults to the last 60 days (?days=, max 180), never earlier than "
+        "signup."
+    ),
+)
+def condition_graph(
+    patient_id: UUID,
+    days: int = 60,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from datetime import timedelta
+    from app.models.appointment import Appointment
+    from app.models.message import Message
+    from app.models.risk_assessment import RiskAssessment
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    days = min(max(days, 7), 180)
+    today = date.today()
+    signup_day = patient.created_at.date() if patient.created_at else today
+    start = max(today - timedelta(days=days - 1), signup_day)
+
+    # Worst inbound triage + message counts per day, one query.
+    messages = (
+        db.query(Message)
+        .filter(Message.patient_id == patient.id, Message.created_at >= start)
+        .all()
+    )
+    by_day: dict = {}
+    for m in messages:
+        if not m.created_at:
+            continue
+        d = m.created_at.date()
+        slot = by_day.setdefault(d, {"worst": None, "in": 0, "out": 0})
+        slot["in" if m.direction == "in" else "out"] += 1
+        if m.direction == "in" and m.triage_level in _TRIAGE_RANK:
+            if slot["worst"] is None or _TRIAGE_RANK[m.triage_level] > _TRIAGE_RANK[slot["worst"]]:
+                slot["worst"] = m.triage_level
+
+    points = []
+    day = start
+    while day <= today:
+        slot = by_day.get(day, {"worst": None, "in": 0, "out": 0})
+        points.append({
+            "date": day.isoformat(),
+            "band": _BAND_BY_TRIAGE[slot["worst"]],
+            "worst_triage": slot["worst"],
+            "messages_in": slot["in"],
+            "messages_out": slot["out"],
+            "ga_weeks": (day - patient.lmp).days // 7 if patient.lmp else None,
+        })
+        day += timedelta(days=1)
+
+    # Overlay events: risk changes, appointments, pregnancy outcome.
+    events = []
+    for ra in (
+        db.query(RiskAssessment)
+        .filter(RiskAssessment.patient_id == patient.id)
+        .order_by(RiskAssessment.computed_at.asc())
+        .all()
+    ):
+        if ra.computed_at:
+            events.append({
+                "date": ra.computed_at.date().isoformat(),
+                "type": "risk_change",
+                "detail": f"risk → {ra.result_level} ({'system' if ra.computed_by == 'system' else 'clinician'})",
+            })
+    for appt in (
+        db.query(Appointment)
+        .filter(Appointment.patient_id == patient.id, Appointment.is_deleted.is_(False))
+        .all()
+    ):
+        events.append({
+            "date": appt.appointment_datetime.date().isoformat(),
+            "type": "appointment",
+            "detail": appt.title,
+        })
+    pregnancy = (
+        db.query(Pregnancy)
+        .filter(Pregnancy.patient_id == patient.id)
+        .order_by(Pregnancy.created_at.desc())
+        .first()
+    )
+    if pregnancy and pregnancy.outcome == "loss" and pregnancy.loss_date:
+        events.append({"date": pregnancy.loss_date.isoformat(),
+                       "type": "loss_marked", "detail": "Pregnancy loss recorded"})
+
+    return {
+        "patient_id": str(patient.id),
+        "risk_level": patient.risk_level,
+        "status": patient.status,
+        "missed_checkin_flag": bool(patient.missed_checkin_flag),
+        "window": {"start": start.isoformat(), "end": today.isoformat()},
+        "points": points,
+        "events": sorted(events, key=lambda e: e["date"]),
+    }

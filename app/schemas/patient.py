@@ -169,6 +169,10 @@ class PatientListItem(BaseModel):
     age: Optional[int] = Field(default=None, examples=[29])
     status: str = Field(..., examples=["active"])
     current_ga_weeks: Optional[int] = Field(default=None, examples=[24])  # computed from lmp
+    risk_level: Optional[str] = Field(default=None, examples=["high"])
+    missed_checkin_flag: bool = Field(default=False, examples=[False])
+    account_type: str = Field(default="smartphone", examples=["smartphone"])
+    last_activity: Optional[datetime] = Field(default=None, examples=["2026-06-05T09:12:00+00:00"])  # latest message either direction
 
     model_config = ConfigDict(
         from_attributes=False,
@@ -180,6 +184,10 @@ class PatientListItem(BaseModel):
                 "age": 29,
                 "status": "active",
                 "current_ga_weeks": 24,
+                "risk_level": "high",
+                "missed_checkin_flag": False,
+                "account_type": "smartphone",
+                "last_activity": "2026-06-05T09:12:00+00:00",
             }]
         },
     )

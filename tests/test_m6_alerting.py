@@ -415,3 +415,112 @@ def test_mark_live_birth_sets_delivered():
             app.dependency_overrides = {}
     assert resp.status_code == 200
     assert patient.status == "delivered"
+
+
+# ── Phase 2: clinician conversation view + condition graph ───────────────────
+
+def _scoped_db(patient, rows_by_model=None):
+    """DB mock: Patient lookup returns patient; other models return their rows."""
+    db = MagicMock()
+    rows_by_model = rows_by_model or {}
+
+    def query(model):
+        q = MagicMock()
+        q.filter.return_value = q
+        q.order_by.return_value = q
+        q.offset.return_value = q
+        q.limit.return_value = q
+        if model.__name__ == "Patient":
+            q.first.return_value = patient
+        else:
+            rows = list(rows_by_model.get(model.__name__, []))
+            q.first.return_value = rows[0] if rows else None
+            q.all.return_value = rows
+            q.count.return_value = len(rows)
+        return q
+
+    db.query.side_effect = query
+    return db
+
+
+def test_conversation_view_hospital_scoped():
+    from app.core.database import get_db as real_get_db
+
+    hid = str(uuid.uuid4())
+    patient = make_patient(hospital_id=hid)
+    msg = SimpleNamespace(
+        id=uuid.uuid4(), direction="in", channel="app", content="I feel fine",
+        message_type="chat", triage_level="low", source_lang="en",
+        flagged_for_review=False,
+        created_at=datetime(2026, 6, 5, 9, 0, tzinfo=timezone.utc),
+    )
+    app.dependency_overrides[real_get_db] = lambda: _scoped_db(patient, {"Message": [msg]})
+    try:
+        resp = client.get(
+            f"/hospital/patients/{patient.id}/messages",
+            headers={"Authorization": f"Bearer {hospital_token(hid)}"},
+        )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["content"] == "I feel fine"
+    assert body["items"][0]["direction"] == "in"
+
+
+def test_conversation_view_other_hospital_404():
+    from app.core.database import get_db as real_get_db
+
+    patient = make_patient(hospital_id=str(uuid.uuid4()))
+    app.dependency_overrides[real_get_db] = lambda: _scoped_db(patient)
+    try:
+        resp = client.get(
+            f"/hospital/patients/{patient.id}/messages",
+            headers={"Authorization": f"Bearer {hospital_token()}"},
+        )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 404
+
+
+def test_conversation_view_rejects_patient_token():
+    resp = client.get(
+        f"/hospital/patients/{uuid.uuid4()}/messages",
+        headers={"Authorization": f"Bearer {patient_token()}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_condition_graph_bands_and_events():
+    from app.core.database import get_db as real_get_db
+
+    hid = str(uuid.uuid4())
+    patient = make_patient(
+        hospital_id=hid,
+        created_at=datetime(2026, 6, 1, 8, 0, tzinfo=timezone.utc),
+        lmp=date(2026, 3, 1),
+    )
+    high_msg = SimpleNamespace(
+        id=uuid.uuid4(), direction="in", channel="app", content="bleeding",
+        message_type="chat", triage_level="high", source_lang="en",
+        flagged_for_review=False,
+        created_at=datetime(2026, 6, 3, 10, 0, tzinfo=timezone.utc),
+    )
+    app.dependency_overrides[real_get_db] = lambda: _scoped_db(patient, {"Message": [high_msg]})
+    try:
+        resp = client.get(
+            f"/hospital/patients/{patient.id}/condition-graph?days=30",
+            headers={"Authorization": f"Bearer {hospital_token(hid)}"},
+        )
+    finally:
+        app.dependency_overrides = {}
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Window starts at signup (2026-06-01), not 30 days back
+    assert body["window"]["start"] == "2026-06-01"
+    by_date = {p["date"]: p for p in body["points"]}
+    assert by_date["2026-06-03"]["band"] == "red"
+    assert by_date["2026-06-03"]["worst_triage"] == "high"
+    assert by_date["2026-06-02"]["band"] == "green"
+    assert by_date["2026-06-03"]["ga_weeks"] == (date(2026, 6, 3) - date(2026, 3, 1)).days // 7
