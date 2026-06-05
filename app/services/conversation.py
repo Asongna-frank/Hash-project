@@ -118,6 +118,11 @@ Patient context:
 Recent conversation history:
 {history}
 
+LANGUAGE RULE (critical): write the "reply" value in the SAME LANGUAGE as the
+patient's message you are answering. If she wrote in French, the reply must be
+entirely in French. Do not copy example responses verbatim — adapt them to her
+language and situation.
+
 CRITICAL OUTPUT RULE: Your ENTIRE output must be a single JSON object and
 nothing else — your first character must be {{ and your last character must
 be }}. Never write the reply text outside the JSON. No explanation, no
