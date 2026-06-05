@@ -78,7 +78,10 @@ async def start_call(
     hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
 
     try:
-        session = calls.create(hospital_id, str(patient.id))
+        session = calls.create(
+            hospital_id, str(patient.id),
+            hospital_name=hospital.name if hospital else "Your hospital",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

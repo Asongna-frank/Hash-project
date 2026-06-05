@@ -310,6 +310,17 @@ async def chat_websocket(
     patient_manager.register(patient_id, websocket)
 
     try:
+        # Re-ring: if the doctor is still calling (she opened the app from the
+        # push within the 45s ring window), deliver the incoming_call frame she
+        # missed while offline.
+        from app.services.call_service import calls as _calls
+        _session = _calls.find_for_patient(patient_id)
+        if _session and _session.state == "ringing":
+            await _ws_send(websocket, {
+                "type": "incoming_call",
+                "call_id": _session.call_id,
+                "hospital_name": _session.hospital_name,
+            })
         # Greet + push unread notifications so the bell is instant, no polling.
         await _ws_send(websocket, {"type": "connected"})
         await _ws_send(websocket, await run_in_threadpool(_fetch_unread, patient_id))

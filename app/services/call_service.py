@@ -75,6 +75,7 @@ class CallSession:
     call_id: str
     hospital_id: str
     patient_id: str
+    hospital_name: str = "Your hospital"
     state: str = "ringing"  # ringing | active | ended
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     answered_at: Optional[datetime] = None
@@ -84,13 +85,15 @@ class CallManager:
     def __init__(self) -> None:
         self._sessions: dict[str, CallSession] = {}
 
-    def create(self, hospital_id: str, patient_id: str) -> CallSession:
+    def create(self, hospital_id: str, patient_id: str,
+               hospital_name: str = "Your hospital") -> CallSession:
         # One live call per patient at a time.
         for s in self._sessions.values():
             if s.patient_id == patient_id and s.state in ("ringing", "active"):
                 raise ValueError("Patient already has a call in progress")
         session = CallSession(call_id=f"call_{uuid.uuid4().hex[:12]}",
-                              hospital_id=hospital_id, patient_id=patient_id)
+                              hospital_id=hospital_id, patient_id=patient_id,
+                              hospital_name=hospital_name)
         self._sessions[session.call_id] = session
         return session
 
