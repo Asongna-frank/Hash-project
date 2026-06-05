@@ -343,3 +343,87 @@ def condition_graph(
         "points": points,
         "events": sorted(events, key=lambda e: e["date"]),
     }
+
+
+# ── Post-loss case view (M9 dashboard) ────────────────────────────────────────
+
+@router.get(
+    "/{patient_id}/post-loss",
+    summary="Post-loss case summary (dashboard banner + timeline)",
+    description=(
+        "Hospital-only, own patients only (others → 404). Returns the M9 case "
+        "for the dashboard's post-loss banner and dedicated view: activation "
+        "details, current paced-cadence stage (day1 → 48h → every3days → "
+        "weekly), PHQ-2 engagement (offered_at, her response in her own words, "
+        "or 'did not engage' after 7 quiet days), opt-out state, and loss "
+        "details from the pregnancy record. 404 with detail 'No post-loss "
+        "case' when the patient is not on the post-loss track."
+    ),
+)
+def post_loss_case_view(
+    patient_id: UUID,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from datetime import datetime, timezone
+    from app.models.post_loss_case import PostLossCase
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    case = (
+        db.query(PostLossCase)
+        .filter(PostLossCase.patient_id == patient.id)
+        .first()
+    )
+    if case is None:
+        raise HTTPException(status_code=404, detail="No post-loss case for this patient")
+
+    pregnancy = (
+        db.query(Pregnancy)
+        .filter(Pregnancy.patient_id == patient.id)
+        .order_by(Pregnancy.created_at.desc())
+        .first()
+    )
+
+    # PHQ-2 engagement state for the mental-health summary (SRS 2.7.3).
+    now = datetime.now(timezone.utc)
+    if case.phq2_offered_at is None:
+        phq2_status = "not_yet_offered"   # offered at week 2 post-activation
+    elif case.phq2_response is not None:
+        phq2_status = "responded"
+    else:
+        offered = case.phq2_offered_at
+        if offered.tzinfo is None:
+            offered = offered.replace(tzinfo=timezone.utc)
+        phq2_status = ("did_not_engage" if (now - offered).days >= 7 else "awaiting_response")
+
+    activated = case.activated_at
+    if activated and activated.tzinfo is None:
+        activated = activated.replace(tzinfo=timezone.utc)
+
+    return {
+        "patient_id": str(patient.id),
+        "activated_at": case.activated_at.isoformat() if case.activated_at else None,
+        "activated_by": case.activated_by,
+        "days_since_activation": (now - activated).days if activated else None,
+        "opener_sent_at": case.opener_sent_at.isoformat() if case.opener_sent_at else None,
+        "current_cadence": case.current_cadence,
+        "phq2": {
+            "status": phq2_status,
+            "offered_at": case.phq2_offered_at.isoformat() if case.phq2_offered_at else None,
+            "response": case.phq2_response,
+            "responded_at": case.phq2_responded_at.isoformat() if case.phq2_responded_at else None,
+        },
+        "opt_out_status": patient.opt_out_status,
+        "loss": {
+            "loss_date": pregnancy.loss_date.isoformat() if pregnancy and pregnancy.loss_date else None,
+            "ga_at_loss": pregnancy.ga_at_loss if pregnancy else None,
+        },
+        "notes": case.notes,
+    }

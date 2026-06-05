@@ -16,6 +16,7 @@ from app.routers import wellness as wellness_router
 from app.models import message  # noqa — ensures table is registered with Base
 from app.models import alert as alert_model  # noqa — registers alerts table
 from app.models import wellness as wellness_model  # noqa — registers daily_wellness table
+from app.models import post_loss_case as post_loss_case_model  # noqa — registers post_loss_cases table
 from app.models import appointment as appointment_model  # noqa — registers appointments table
 from app.models import personnel as personnel_model    # noqa — registers personnel table
 from app.models import audit_log as audit_log_model    # noqa — registers audit_logs table

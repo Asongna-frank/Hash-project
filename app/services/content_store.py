@@ -26,6 +26,56 @@ logger = logging.getLogger(__name__)
 SUPPORTED_LANGUAGES = ("en", "fr", "pt")
 
 _CONTENT: dict[str, dict[str, str]] = {
+    # M9 — gentle plain-language PHQ-2 check, offered once at week 2 post-loss.
+    # Conversational, never framed as a clinical instrument (SRS 2.7.1).
+    # TODO: final wording to be signed off by Dr Elvira.
+    "phq2_check": {
+        "en": (
+            "I've been thinking of you. If you feel like sharing — these past two "
+            "weeks, have you often been feeling down or without hope? And have you "
+            "still found some joy in the things you usually like? You can answer in "
+            "your own words, or not at all. I'm here either way."
+        ),
+        "fr": (
+            "Je pensais à vous. Si vous avez envie d'en parler — ces deux dernières "
+            "semaines, vous êtes-vous souvent sentie triste ou sans espoir ? Et "
+            "trouvez-vous encore un peu de joie dans les choses que vous aimez "
+            "d'habitude ? Vous pouvez répondre avec vos propres mots, ou pas du "
+            "tout. Je suis là dans tous les cas."
+        ),
+        "pt": (
+            "Tenho pensado em si. Se quiser partilhar — nestas duas últimas semanas, "
+            "tem-se sentido muitas vezes triste ou sem esperança? E ainda encontra "
+            "alguma alegria nas coisas de que costuma gostar? Pode responder com as "
+            "suas próprias palavras, ou não responder. Estou aqui de qualquer forma."
+        ),
+    },
+    # M9 — crisis-resource message with local contacts. Sent by SMS even to
+    # smartphone patients so it lands with the app closed (SRS 2.7.1).
+    # TODO: hotline list to be confirmed by Dr Elvira before launch.
+    "crisis_resources": {
+        "en": (
+            "You matter, and you don't have to carry this alone. Please reach out "
+            "right now: call your hospital, or dial 112 (emergency) or 1510 "
+            "(Cameroon health emergency line). Your care team has also been "
+            "notified and is there for you. If you can, stay with someone you "
+            "trust today."
+        ),
+        "fr": (
+            "Vous comptez, et vous n'avez pas à porter cela seule. Cherchez de "
+            "l'aide maintenant : appelez votre hôpital, ou composez le 112 "
+            "(urgences) ou le 1510 (ligne d'urgence santé du Cameroun). Votre "
+            "équipe de soins a aussi été prévenue et est là pour vous. Si "
+            "possible, restez aujourd'hui avec une personne de confiance."
+        ),
+        "pt": (
+            "Você é importante e não tem de carregar isto sozinha. Procure ajuda "
+            "agora: ligue para o seu hospital, ou marque 112 (emergência) ou 1510 "
+            "(linha de emergência de saúde dos Camarões). A sua equipa de cuidados "
+            "também foi avisada e está consigo. Se puder, fique hoje com alguém de "
+            "confiança."
+        ),
+    },
     # CRISIS — confirmed pregnancy loss opening message (pre-approved, never live-translated)
     "post_loss_opening": {
         "en": (

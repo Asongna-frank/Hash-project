@@ -237,8 +237,13 @@ def process_message(
     # wins over the LLM classifier, and works even if the LLM is unreachable.
     red_flags = match_red_flags(english_text)
 
-    # STEP 3 — post-loss track (same engine, post-loss mode; M9 extends this)
+    # STEP 3 — post-loss track (same engine, post-loss mode)
     if patient.status == "post_loss":
+        # M9: if the gentle PHQ-2 was offered and unanswered, this reply IS
+        # her response — recorded in her own words, never re-asked.
+        from app.services.post_loss import record_phq2_response_if_pending, send_crisis_resources
+        record_phq2_response_if_pending(db, patient, english_text)
+
         reply_en, triage = generate_reply(patient, english_text, db)
         if red_flags:
             triage = "high"
@@ -257,6 +262,10 @@ def process_message(
                         else "High-acuity post-loss message"),
                 source="post_loss_crisis",
             )
+            if is_crisis_signal(red_flags):
+                # SRS 2.7.1: crisis-resource message with hotlines goes by SMS
+                # even to smartphone patients, so it lands with the app closed.
+                send_crisis_resources(patient)
         return ChatReply(text=reply_local, channel=channel, triage_level=triage,
                          loss_detected=True)
 
@@ -321,6 +330,9 @@ def process_message(
         else:
             reason = "High-acuity chat message"
         _alert_hospital(patient, db, reason=reason)
+        if red_flags and is_crisis_signal(red_flags):
+            from app.services.post_loss import send_crisis_resources
+            send_crisis_resources(patient)
 
     return ChatReply(text=reply_local, channel=channel, triage_level=triage,
                      loss_detected=False)

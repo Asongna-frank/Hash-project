@@ -52,16 +52,71 @@ def _last_checkin_sent_at(patient_id, db: Session) -> datetime | None:
     return msg.created_at if msg else None
 
 
+def _post_loss_pacing(days_since_activation: float) -> tuple[timedelta | None, str]:
+    """
+    SRS 2.7.2 paced cadence: day 1 opener only → first check-in at +48h →
+    every 3 days → settling into weekly from week 3.
+    Returns (interval, stage); interval=None means "nothing before 48h".
+    """
+    if days_since_activation < 2:
+        return None, "day1"
+    if days_since_activation < 5:
+        return timedelta(days=2), "48h"
+    if days_since_activation < 21:
+        return timedelta(days=3), "every3days"
+    return timedelta(days=7), "weekly"
+
+
+def _is_post_loss_checkin_due(patient: Patient, db: Session) -> bool:
+    """Paced due-logic for post-loss patients (replaces the risk cadence —
+    a post-loss patient must never be bombarded, whatever her risk level)."""
+    from app.services.post_loss import get_case
+
+    case = get_case(db, patient.id)
+    if case is None:
+        # Legacy post-loss patient without a case (pre-M9): weekly, gently.
+        last_sent = _last_checkin_sent_at(patient.id, db)
+        if last_sent is None:
+            return True
+        if last_sent.tzinfo is None:
+            last_sent = last_sent.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - last_sent >= timedelta(days=7)
+
+    now = datetime.now(timezone.utc)
+    activated = case.activated_at
+    if activated.tzinfo is None:
+        activated = activated.replace(tzinfo=timezone.utc)
+    days_since = (now - activated).total_seconds() / 86400
+
+    interval, stage = _post_loss_pacing(days_since)
+    if case.current_cadence != stage:
+        case.current_cadence = stage  # caller's send path commits
+    if interval is None:
+        return False  # day 1: the opener was the only message
+
+    last_sent = _last_checkin_sent_at(patient.id, db)
+    if last_sent is None or last_sent <= activated:
+        return True  # first paced check-in (the 48h touch)
+    if last_sent.tzinfo is None:
+        last_sent = last_sent.replace(tzinfo=timezone.utc)
+    return now - last_sent >= interval
+
+
 def _is_checkin_due(patient: Patient, db: Session) -> bool:
     """
     Return True when a proactive check-in should fire for this patient.
 
     Rules (in order):
+    0. Post-loss track → paced cadence (48h → every 3 days → weekly), never
+       the risk cadence.
     1. Never sent → always due.
     2. Standard risk interval elapsed → due.
     3. Low-risk milestone week (12, 20, 28, 36): due if last check-in > 7 days ago,
        even while still inside the 14-day fortnightly window.
     """
+    if patient.status == "post_loss":
+        return _is_post_loss_checkin_due(patient, db)
+
     risk     = patient.risk_level or "medium"
     interval = _RISK_INTERVALS.get(risk, _RISK_INTERVALS["medium"])
 
@@ -198,7 +253,26 @@ def send_checkin(patient: Patient, db: Session) -> bool:
     # Update missed-response counter before sending the new check-in.
     _update_missed_counter(patient, db)
 
-    checkin_text = generate_checkin(patient)
+    # M9: at week 2 post-loss, this slot carries the gentle PHQ-2 check —
+    # offered exactly once, pre-approved wording, never re-asked (SRS 2.7.1).
+    phq2_case = None
+    if patient.status == "post_loss":
+        from app.services.post_loss import get_case
+        case = get_case(db, patient.id)
+        if case is not None and case.phq2_offered_at is None:
+            activated = case.activated_at
+            if activated is not None:
+                if activated.tzinfo is None:
+                    activated = activated.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - activated) >= timedelta(days=14):
+                    phq2_case = case
+
+    if phq2_case is not None:
+        from app.services.content_store import get_content
+        lang = (getattr(patient, "language", None) or "en").lower()
+        checkin_text = get_content("phq2_check", lang)
+    else:
+        checkin_text = generate_checkin(patient)
 
     if patient.account_type == "choronko":
         result = sms_service.send_sms(to=patient.phone, message=checkin_text)
@@ -219,6 +293,10 @@ def send_checkin(patient: Patient, db: Session) -> bool:
                 "Push notification failed for check-in | patient=%s | %s",
                 patient.id, result.error,
             )
+
+    if phq2_case is not None:
+        phq2_case.phq2_offered_at = datetime.now(timezone.utc)
+        db.add(phq2_case)
 
     db.add(patient)  # persist counter/flag changes
     db.add(msg)

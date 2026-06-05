@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.risk_config import RUBRIC_VERSION
 from app.models.patient import Patient
+from app.models.post_loss_case import PostLossCase
 from app.models.pregnancy import Pregnancy
 from app.models.risk_assessment import RiskAssessment
 from app.services import content_store
@@ -82,6 +83,17 @@ def activate_post_loss(
             score=None,
         ))
 
+    # M9 case record — drives the paced cadence, PHQ-2 watch, and dashboard view.
+    now = datetime.now(timezone.utc)
+    case = db.query(PostLossCase).filter(PostLossCase.patient_id == patient.id).first()
+    if case is None:
+        case = PostLossCase(patient_id=patient.id, activated_by=activated_by)
+        db.add(case)
+    case.activated_at = now
+    case.activated_by = activated_by
+    case.opener_sent_at = now
+    case.current_cadence = "day1"
+
     # Pre-approved opener, stored per language — never live-translated.
     opener = content_store.get_content("post_loss_opening", _patient_lang(patient))
     channel = "sms" if patient.account_type == "choronko" else "app"
@@ -116,3 +128,46 @@ def mark_live_birth(db: Session, patient: Patient, pregnancy: Pregnancy | None) 
         pregnancy.routine_paused = True
     db.commit()
     logger.info("Live birth recorded | patient=%s", patient.id)
+
+
+# ── M9 helpers ────────────────────────────────────────────────────────────────
+
+def get_case(db: Session, patient_id) -> PostLossCase | None:
+    return db.query(PostLossCase).filter(PostLossCase.patient_id == patient_id).first()
+
+
+def record_phq2_response_if_pending(db: Session, patient: Patient, english_text: str) -> None:
+    """
+    Capture the FIRST reply after the PHQ-2 was offered as her response —
+    in her own words, no scoring, no follow-up nudges (SRS 2.7.1). No-op if
+    no case, not offered yet, or already answered. Caller commits.
+    """
+    case = get_case(db, patient.id)
+    if case is None or case.phq2_offered_at is None or case.phq2_response is not None:
+        return
+    case.phq2_response = english_text[:2000]
+    case.phq2_responded_at = datetime.now(timezone.utc)
+    db.add(case)
+    logger.info("PHQ-2 response recorded | patient=%s", patient.id)
+
+
+def send_crisis_resources(patient: Patient) -> None:
+    """
+    Send the pre-approved crisis-resource message (local hotlines) by SMS —
+    even to smartphone patients, so it lands with the app closed (SRS 2.7.1).
+    Best-effort: failure is logged, never raised.
+    """
+    text = content_store.get_content("crisis_resources", _patient_lang(patient))
+    try:
+        result = sms_service.send_sms(patient.phone, text)
+        if not result.ok:
+            logger.error("Crisis-resource SMS failed | patient=%s | %s",
+                         patient.id, result.error)
+    except Exception:  # noqa: BLE001
+        logger.exception("Crisis-resource SMS error | patient=%s", patient.id)
+    # Also push to the app as a belt-and-braces channel for smartphone users.
+    if patient.account_type != "choronko":
+        try:
+            push_service.send_push(str(patient.id), "HASH", text)
+        except Exception:  # noqa: BLE001
+            logger.exception("Crisis-resource push failed | patient=%s", patient.id)
