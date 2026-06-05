@@ -285,14 +285,31 @@ def test_stub_parser_raises_not_implemented():
         StubInboundSMSParser().verify_and_parse({}, b"")
 
 
-def test_webhook_handles_stub_gap_without_crashing():
+def test_webhook_handles_stub_gap_without_crashing(monkeypatch):
     from app.main import app
     from app.core.database import get_db
-    # default parser is the stub → webhook should return 503, not crash
+    import app.routers.sms as sms_router
+    # with NO provider configured (stub) → webhook returns 503, not a crash
+    monkeypatch.setattr(sms_router, "inbound_sms_parser", StubInboundSMSParser())
     app.dependency_overrides[get_db] = fake_db
     try:
         r = TestClient(app, raise_server_exceptions=False).post("/sms/inbound", content=b"raw")
         assert r.status_code == 503
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_webhook_rejects_unsigned_when_twilio_configured():
+    from app.main import app
+    from app.core.database import get_db
+    # live default parser is Twilio (env configured) → unsigned garbage = 400
+    from app.services.sms_service import get_inbound_sms_parser, TwilioInboundSMSParser
+    if not isinstance(get_inbound_sms_parser(), TwilioInboundSMSParser):
+        pytest.skip("Twilio inbound not configured in this environment")
+    app.dependency_overrides[get_db] = fake_db
+    try:
+        r = TestClient(app, raise_server_exceptions=False).post("/sms/inbound", content=b"raw")
+        assert r.status_code == 400
     finally:
         app.dependency_overrides.clear()
 

@@ -14,7 +14,7 @@ unimplemented, so the channel is "ready except the provider adapter."
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -71,6 +71,15 @@ async def sms_inbound(request: Request, db: Session = Depends(get_db)):
     """
     raw_body = await request.body()
     headers = dict(request.headers)
+    # Twilio requires a TwiML response; our REST reply path does the actual
+    # sending, so an empty <Response/> keeps the console warning-free.
+    is_twilio = "x-twilio-signature" in headers
+
+    def _respond(payload: dict):
+        if is_twilio:
+            return Response(content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                            media_type="application/xml")
+        return payload
 
     # 1. Verify + parse. The provider adapter is stubbed → handle cleanly, no crash.
     try:
@@ -90,19 +99,19 @@ async def sms_inbound(request: Request, db: Session = Depends(get_db)):
         phone_e164 = normalize_phone(inbound.from_phone)
     except ValueError:
         logger.warning("Inbound SMS from unparseable number — ignoring")
-        return {"status": "ignored"}
+        return _respond({"status": "ignored"})
 
     patient = _lookup_patient_by_phone(phone_e164, db)
     if patient is None:
         # Do not leak existence; optionally tell the sender they aren't registered.
         logger.info("Inbound SMS from unregistered number — ignoring")
-        return {"status": "ignored"}
+        return _respond({"status": "ignored"})
 
     # 3. Idempotency
     if _is_duplicate(inbound.provider_message_id, db):
         logger.info("Inbound SMS duplicate (provider_message_id=%s) — no-op",
                     inbound.provider_message_id)
-        return {"status": "duplicate"}
+        return _respond({"status": "duplicate"})
 
     # 4. Shared brain
     reply = process_message(
@@ -113,4 +122,5 @@ async def sms_inbound(request: Request, db: Session = Depends(get_db)):
     # 5. Send the reply back out via the originating channel (SMS)
     sms_service.send_sms(to=patient.phone, message=reply.text)
 
-    return {"status": "ok", "is_crisis": reply.is_crisis, "triage_level": reply.triage_level}
+    return _respond({"status": "ok", "is_crisis": reply.is_crisis,
+                     "triage_level": reply.triage_level})

@@ -108,6 +108,42 @@ class BaseInboundSMSParser(ABC):
         ...
 
 
+class TwilioInboundSMSParser(BaseInboundSMSParser):
+    """
+    Inbound SMS via a Twilio number's incoming-message webhook.
+
+    Twilio POSTs application/x-www-form-urlencoded fields (From, Body,
+    MessageSid, ...) and signs every request with X-Twilio-Signature
+    (HMAC-SHA1 over the exact public URL + sorted params, keyed by the
+    auth token). We verify with Twilio's own RequestValidator — a request
+    that fails validation raises and the webhook returns 400.
+    """
+
+    def __init__(self) -> None:
+        self._auth_token = settings.TWILIO_AUTH_TOKEN
+        self._url = settings.TWILIO_INBOUND_WEBHOOK_URL
+
+    def verify_and_parse(self, request_headers: dict, raw_body: bytes) -> InboundSMS:
+        from urllib.parse import parse_qsl
+
+        from twilio.request_validator import RequestValidator
+
+        params = dict(parse_qsl(raw_body.decode("utf-8"), keep_blank_values=True))
+        signature = request_headers.get("x-twilio-signature", "")
+        if not RequestValidator(self._auth_token).validate(self._url, params, signature):
+            raise ValueError("Invalid Twilio signature")
+
+        from_phone = params.get("From", "")
+        text = params.get("Body", "")
+        if not from_phone or not text.strip():
+            raise ValueError("Missing From/Body in Twilio payload")
+        return InboundSMS(
+            from_phone=from_phone,
+            text=text,
+            provider_message_id=params.get("MessageSid"),
+        )
+
+
 class StubInboundSMSParser(BaseInboundSMSParser):
     """
     Placeholder until the inbound SMS provider is chosen. Everything around it
@@ -122,6 +158,8 @@ class StubInboundSMSParser(BaseInboundSMSParser):
 
 
 def get_inbound_sms_parser() -> BaseInboundSMSParser:
+    if settings.TWILIO_AUTH_TOKEN and settings.TWILIO_INBOUND_WEBHOOK_URL:
+        return TwilioInboundSMSParser()
     return StubInboundSMSParser()
 
 

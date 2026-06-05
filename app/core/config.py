@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_FROM_NUMBER: str = ""
+    # Exact public URL Twilio calls for inbound SMS — required for signature
+    # validation. When set (with the auth token), two-way SMS is live.
+    TWILIO_INBOUND_WEBHOOK_URL: str = ""
 
     # OneSignal push (smartphone track).
     # Add these to .env:
