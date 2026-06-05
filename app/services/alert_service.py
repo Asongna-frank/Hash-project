@@ -112,6 +112,11 @@ def alert_to_dict(alert: Alert, patient: Patient | None = None) -> dict:
         "gps_lat": alert.gps_lat,
         "gps_lng": alert.gps_lng,
         "status": alert.status,
+        # UI hint: how loudly the dashboard should announce this alert.
+        # critical -> looping siren until acknowledged; normal -> single chime.
+        "priority": ("critical" if (alert.triage_level == "high"
+                                    or alert.source == "emergency_button")
+                     else "normal"),
         "created_at": alert.created_at.isoformat() if alert.created_at else None,
         "acknowledged_at": alert.acknowledged_at.isoformat() if alert.acknowledged_at else None,
         "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None,
