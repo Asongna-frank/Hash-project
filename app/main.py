@@ -14,6 +14,7 @@ from app.routers import sms as sms_router
 from app.routers import alerts as alerts_router
 from app.routers import wellness as wellness_router
 from app.routers import avatar as avatar_router
+from app.routers import hospital_notifications as hospital_notifications_router
 from app.models import message  # noqa — ensures table is registered with Base
 from app.models import alert as alert_model  # noqa — registers alerts table
 from app.models import wellness as wellness_model  # noqa — registers daily_wellness table
@@ -92,3 +93,6 @@ app.include_router(sms_router.router,    prefix="/sms",                   tags=[
 app.include_router(alerts_router.router, prefix="/alerts",                tags=["alerts"])
 app.include_router(wellness_router.router, prefix="/patients",              tags=["wellness"])
 app.include_router(avatar_router.router, prefix="/patients",               tags=["patients"])
+app.include_router(hospital_notifications_router.router,
+                   prefix="/hospital/notifications",
+                   tags=["hospital-notifications"])
