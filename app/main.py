@@ -16,6 +16,7 @@ from app.routers import wellness as wellness_router
 from app.routers import avatar as avatar_router
 from app.routers import hospital_notifications as hospital_notifications_router
 from app.routers import hospital_stats as hospital_stats_router
+from app.routers import calls as calls_router
 from app.models import message  # noqa — ensures table is registered with Base
 from app.models import alert as alert_model  # noqa — registers alerts table
 from app.models import wellness as wellness_model  # noqa — registers daily_wellness table
@@ -101,3 +102,4 @@ app.include_router(hospital_notifications_router.router,
 app.include_router(hospital_stats_router.router,
                    prefix="/hospital/stats",
                    tags=["hospital-stats"])
+app.include_router(calls_router.router,  prefix="/calls",                 tags=["calls"])

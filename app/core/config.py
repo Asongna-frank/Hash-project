@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     OPENAI_REALTIME_MODEL: str = "gpt-realtime"
     OPENAI_REALTIME_VOICE: str = "marin"
 
+    # Optional TURN relay for doctor->patient WebRTC calls (recommended for
+    # reliability across mobile networks; STUN-only works on most home/office NATs).
+    TURN_URL: str = ""
+    TURN_USERNAME: str = ""
+    TURN_CREDENTIAL: str = ""
+
     # Twilio SMS (choronko track).
     # Add these to .env:
     #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

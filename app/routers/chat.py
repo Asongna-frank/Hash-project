@@ -46,6 +46,11 @@ from app.services.chat_core import process_message
 from app.services.alert_service import create_alert
 from app.services.message_store import save_inbound, save_outbound
 from app.services.red_flags import is_crisis_signal, match_red_flags
+from app.services.call_service import (
+    end_calls_for_disconnected_patient,
+    handle_patient_frame,
+    patient_manager,
+)
 from app.services.voice_service import (
     MAX_AUDIO_BYTES,
     SUPPORTED_AUDIO_TYPES,
@@ -302,6 +307,7 @@ async def chat_websocket(
         return
 
     logger.info("Chat WS connected | patient=%s", patient_id)
+    patient_manager.register(patient_id, websocket)
 
     try:
         # Greet + push unread notifications so the bell is instant, no polling.
@@ -324,6 +330,13 @@ async def chat_websocket(
             # ── heartbeat ────────────────────────────────────────────────────
             if action == "ping":
                 await _ws_send(websocket, {"type": "pong"})
+                continue
+
+            # ── voice call signaling (doctor -> patient WebRTC) ─────────────
+            if action in ("call_answer", "call_signal", "call_end"):
+                err = await handle_patient_frame(patient_id, data)
+                if err:
+                    await _ws_send(websocket, err)
                 continue
 
             # ── chat history page ────────────────────────────────────────────
@@ -403,6 +416,11 @@ async def chat_websocket(
             await websocket.close(code=1011, reason="Internal error")
         except RuntimeError:
             pass  # already closed
+    finally:
+        patient_manager.unregister(patient_id, websocket)
+        if not patient_manager.is_online(patient_id):
+            # Last socket gone — tear down any live call so the doctor knows.
+            await end_calls_for_disconnected_patient(patient_id)
 
 
 # ── Voice notes (Whisper STT → brain → TTS) ──────────────────────────────────

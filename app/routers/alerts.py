@@ -23,6 +23,7 @@ from app.models.patient import Patient
 from app.schemas.alert import AlertResponse, AlertStatusUpdate, EmergencyRequest
 from app.services.alert_service import alert_to_dict, create_alert, manager
 from app.services.audit import write_audit
+from app.services.call_service import handle_hospital_frame
 from app.utils.access import require_hospital, require_patient
 
 router = APIRouter()
@@ -278,6 +279,11 @@ async def alerts_websocket(
                 data = {}
             if isinstance(data, dict) and data.get("action") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
+            elif isinstance(data, dict) and data.get("action") in (
+                "call_signal", "call_end",
+            ):
+                # Voice-call signaling relay (doctor -> patient WebRTC)
+                await handle_hospital_frame(hospital_id, data, websocket)
             # All mutations (ack/resolve) go through the REST PATCH so they are
             # validated + audited in one place; the result is broadcast back here.
 
