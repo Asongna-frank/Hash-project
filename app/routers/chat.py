@@ -534,7 +534,17 @@ def create_realtime_session(
             "type": "realtime",
             "model": settings.OPENAI_REALTIME_MODEL,
             "instructions": _realtime_instructions(patient),
-            "audio": {"output": {"voice": settings.OPENAI_REALTIME_VOICE}},
+            "audio": {
+                # Input transcription ON — the app receives
+                # conversation.item.input_audio_transcription.completed events
+                # and MUST forward each final user transcript to
+                # POST /chat/realtime/transcript (red-flag safety net: spoken
+                # danger signs raise the same hospital alert as typed ones).
+                "input": {
+                    "transcription": {"model": settings.OPENAI_STT_MODEL},
+                },
+                "output": {"voice": settings.OPENAI_REALTIME_VOICE},
+            },
         },
     }
     try:
