@@ -33,8 +33,11 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 # Tone prompt for gpt-4o-mini-tts (ignored by tts-1 models).
 _TTS_INSTRUCTIONS = (
-    "Speak warmly, calmly and unhurried — like a caring nurse talking to a "
-    "pregnant woman. Gentle, reassuring, never rushed or clinical."
+    "You are a warm, middle-aged Cameroonian woman — a caring maternal nurse. "
+    "Speak with a gentle African (Cameroonian) accent and melody, calmly and "
+    "unhurried, like an auntie reassuring a pregnant woman she cares about. "
+    "Warm, kind, never rushed, never clinical. In French, use a Cameroonian "
+    "French accent."
 )
 
 
