@@ -309,5 +309,62 @@ def get_todays_checkin(
             "created_at": created.isoformat() if created else None,
             "is_today": is_today,
             "answered": answered,
+            "quick_replies": _quick_replies(patient),
         }
     }
+
+
+# ── Quick-reply chips for the check-in card ──────────────────────────────────
+# Pre-approved strings (en/fr) — personalized by the patient's conditions and
+# state. Tapping a chip sends its text as a normal chat message, so the answer
+# flows through the SAME triage/red-flag pipeline as typed text ("I am
+# bleeding" chip → red flag → HIGH → hospital alert).
+
+_CHIPS = {
+    "fine":        {"en": "I'm feeling fine today 😊", "fr": "Je me sens bien aujourd'hui 😊"},
+    "not_well":    {"en": "I'm not feeling well",       "fr": "Je ne me sens pas bien"},
+    "bleeding":    {"en": "I am bleeding",              "fr": "Je saigne"},
+    "headache":    {"en": "I have a severe headache",   "fr": "J'ai un fort mal de tête"},
+    "swelling":    {"en": "My face or hands are swelling", "fr": "Mon visage ou mes mains gonflent"},
+    "dizzy":       {"en": "I feel dizzy or weak",       "fr": "Je me sens étourdie ou faible"},
+    "sugar":       {"en": "I'm worried about my sugar levels", "fr": "Je m'inquiète pour mon taux de sucre"},
+    "movement":    {"en": "Baby is not moving much",    "fr": "Le bébé ne bouge pas beaucoup"},
+    "pain":        {"en": "I have unusual pain",        "fr": "J'ai des douleurs inhabituelles"},
+    # post-loss set — gentle, no symptom-quiz feel
+    "pl_ok":       {"en": "I'm okay today",             "fr": "Ça va aujourd'hui"},
+    "pl_hard":     {"en": "Today is hard",              "fr": "Aujourd'hui est difficile"},
+    "pl_talk":     {"en": "I'd like to talk",           "fr": "J'aimerais parler"},
+    "pl_physical": {"en": "I have physical symptoms",   "fr": "J'ai des symptômes physiques"},
+}
+
+
+def _quick_replies(patient) -> list[str]:
+    lang = "fr" if (getattr(patient, "language", None) or "en").lower() == "fr" else "en"
+
+    if patient.status == "post_loss":
+        keys = ["pl_ok", "pl_hard", "pl_talk", "pl_physical"]
+        return [_CHIPS[k][lang] for k in keys]
+
+    keys = ["fine"]
+    # Condition-personalized probes (most relevant first)
+    if getattr(patient, "has_hypertension", False) or getattr(patient, "previous_preeclampsia", False):
+        keys += ["headache", "swelling"]
+    if getattr(patient, "has_diabetes", False):
+        keys += ["sugar"]
+    if getattr(patient, "has_severe_anaemia", False) or getattr(patient, "has_sickle_cell", False):
+        keys += ["dizzy"]
+    # Fetal movement once it is clinically meaningful (~week 20+)
+    try:
+        from datetime import date as _d
+        if patient.lmp and (_d.today() - patient.lmp).days // 7 >= 20:
+            keys += ["movement"]
+    except Exception:  # noqa: BLE001
+        pass
+    # Universal danger + catch-alls
+    keys += ["bleeding", "pain", "not_well"]
+    seen, ordered = set(), []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            ordered.append(k)
+    return [_CHIPS[k][lang] for k in ordered[:7]]  # cap at 7 chips
