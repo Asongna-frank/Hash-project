@@ -206,9 +206,14 @@ def patient_conversation(
     total = q.count()
     rows = q.offset(skip).limit(limit).all()
 
+    from app.services.takeover import takeovers as _takeovers
+    _t = _takeovers.get(str(patient.id))
     return {
         "total": total,
         "has_more": skip + len(rows) < total,
+        "takeover": ({"active": True, "author_name": _t.author_name,
+                      "started_at": _t.started_at.isoformat()} if _t
+                     else {"active": False}),
         "items": [
             {
                 "id": str(m.id),
@@ -216,6 +221,7 @@ def patient_conversation(
                 "channel": m.channel,
                 "content": m.content,
                 "message_type": m.message_type,
+                "author_name": getattr(m, "author_name", None),
                 "triage_level": m.triage_level,
                 "source_lang": m.source_lang,
                 "flagged_for_review": m.flagged_for_review,
@@ -530,3 +536,205 @@ def list_patient_notes(
     rows = q.offset(skip).limit(limit).all()
     return {"total": total, "has_more": skip + len(rows) < total,
             "items": [_note_to_dict(n) for n in rows]}
+
+
+# ── Clinician intervention in the chat ────────────────────────────────────────
+
+class ClinicianMessage(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000,
+                      examples=["Hello Maria, this is Dr Elvira. I saw your message about the bleeding — please come to the hospital this morning and ask for me at reception."])
+    author_name: Optional[str] = Field(default=None, max_length=120, examples=["Dr Elvira"])
+
+    model_config = ConfigDict(json_schema_extra={"examples": [{
+        "text": "Hello Maria, this is Dr Elvira. Please come in this morning and ask for me.",
+        "author_name": "Dr Elvira",
+    }]})
+
+
+@router.post(
+    "/{patient_id}/messages",
+    status_code=201,
+    summary="Send a message to the patient (clinician intervention)",
+    description=(
+        "Hospital-only, own patients only (others → 404). A HUMAN clinician "
+        "writes directly into the patient's chat. The message is stored with "
+        "message_type='clinician' + the author signature, delivered in real "
+        "time over her chat WebSocket as a `clinician_message` frame (so the "
+        "app can show a 'clinician joined the conversation' banner and style "
+        "the bubble differently from the bot), pushed via OneSignal if her "
+        "app is closed, and sent by SMS for choronko patients. The bot does "
+        "NOT reply to this message; her future replies still flow through "
+        "the normal triage pipeline. Audited."
+    ),
+)
+async def send_clinician_message(
+    patient_id: UUID,
+    body: ClinicianMessage,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from starlette.concurrency import run_in_threadpool
+    from app.models.hospital import Hospital
+    from app.services.call_service import _push, patient_manager
+    from app.services.message_store import save_outbound
+    from app.services.sms_service import sms_service
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    hospital = db.query(Hospital).filter(Hospital.id == caller_hospital_id).first()
+    author = (body.author_name or "").strip() or None
+    text = body.text.strip()
+    channel = "sms" if patient.account_type == "choronko" else "app"
+
+    msg = save_outbound(patient.id, text, channel=channel,
+                        message_type="clinician",
+                        source_lang=(patient.language or "en"),
+                        author_name=author)
+    db.add(msg)
+    write_audit(
+        db, actor_type="hospital", actor_id=caller_hospital_id,
+        action="patient.clinician_message", target_type="patient",
+        target_id=patient.id, details={"author_name": author},
+    )
+    db.commit()
+    db.refresh(msg)
+
+    delivered_realtime = False
+    if channel == "sms":
+        # Choronko: the chat IS her SMS thread
+        sender = f"{author}, {hospital.name}" if author else (hospital.name if hospital else "Your care team")
+        result = sms_service.send_sms(patient.phone, f"{sender}: {text}")
+        if not result.ok:
+            logger.error("Clinician SMS failed | patient=%s | %s", patient.id, result.error)
+    else:
+        # Real-time signal into the open app
+        delivered_realtime = await patient_manager.send(str(patient.id), {
+            "type": "clinician_message",
+            "message": {
+                "id": str(msg.id),
+                "content": text,
+                "author_name": author,
+                "hospital_name": hospital.name if hospital else "Your hospital",
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            },
+        })
+        # Push so it lands even with the app closed
+        await run_in_threadpool(
+            _push, str(patient.id),
+            f"💬 {author or 'Your care team'}",
+            text[:140],
+        )
+
+    logger.info("Clinician message | hospital=%s | patient=%s | realtime=%s",
+                caller_hospital_id, patient.id, delivered_realtime)
+    return {
+        "id": str(msg.id),
+        "message_type": "clinician",
+        "author_name": author,
+        "channel": channel,
+        "delivered_realtime": delivered_realtime,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
+    }
+
+
+# ── Chat takeover (doctor joins / leaves the conversation) ────────────────────
+
+class TakeoverStart(BaseModel):
+    author_name: Optional[str] = Field(default=None, max_length=120, examples=["Dr Elvira"])
+
+    model_config = ConfigDict(json_schema_extra={"examples": [{"author_name": "Dr Elvira"}]})
+
+
+@router.post(
+    "/{patient_id}/takeover",
+    status_code=201,
+    summary="Join the conversation (bot goes silent)",
+    description=(
+        "Hospital-only, own patients only. Starts a clinician takeover: the "
+        "bot stops replying to this patient; her messages are relayed live to "
+        "the dashboard ({'type':'patient_message'} on /alerts/ws); the app "
+        "shows a 'clinician joined' banner ({'type':'clinician_joined'} frame, "
+        "re-sent on reconnect). Red-flag monitoring stays on. End it with "
+        "DELETE — the bot resumes. 409 if already active. Not available for "
+        "choronko patients. Audited."
+    ),
+)
+async def start_takeover(
+    patient_id: UUID,
+    body: TakeoverStart,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from app.models.hospital import Hospital
+    from app.services.call_service import patient_manager
+    from app.services.takeover import takeovers
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    if patient.account_type == "choronko":
+        raise HTTPException(status_code=422, detail="Choronko patients chat by SMS — send messages directly")
+    if takeovers.is_active(str(patient.id)):
+        raise HTTPException(status_code=409, detail="A takeover is already active for this patient")
+
+    hospital = db.query(Hospital).filter(Hospital.id == caller_hospital_id).first()
+    author = (body.author_name or "").strip() or None
+    t = takeovers.start(str(patient.id), caller_hospital_id, author,
+                        hospital.name if hospital else "Your hospital")
+
+    delivered = await patient_manager.send(str(patient.id), {
+        "type": "clinician_joined",
+        "author_name": author,
+        "hospital_name": t.hospital_name,
+    })
+    write_audit(db, actor_type="hospital", actor_id=caller_hospital_id,
+                action="chat.takeover.start", target_type="patient",
+                target_id=patient.id, details={"author_name": author})
+    db.commit()
+    return {"takeover": True, "author_name": author,
+            "patient_online": delivered, "started_at": t.started_at.isoformat()}
+
+
+@router.delete(
+    "/{patient_id}/takeover",
+    summary="Leave the conversation (bot resumes)",
+    description=(
+        "Hospital-only. Ends the takeover: the app gets a "
+        "{'type':'clinician_left'} frame and the bot resumes replying. "
+        "Idempotent — 200 even if no takeover was active. Audited."
+    ),
+)
+async def end_takeover(
+    patient_id: UUID,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from app.services.call_service import patient_manager
+    from app.services.takeover import takeovers
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    t = takeovers.end(str(patient.id))
+    if t:
+        await patient_manager.send(str(patient.id), {"type": "clinician_left"})
+        write_audit(db, actor_type="hospital", actor_id=caller_hospital_id,
+                    action="chat.takeover.end", target_type="patient",
+                    target_id=patient.id, details={"author_name": t.author_name})
+        db.commit()
+    return {"takeover": False}

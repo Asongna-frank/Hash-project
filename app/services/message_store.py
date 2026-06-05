@@ -43,6 +43,7 @@ def save_outbound(
     channel: str = "app",
     message_type: str = "chat",
     source_lang: str | None = None,
+    author_name: str | None = None,
 ) -> Message:
     """
     Create a Message object for a message sent FROM the system TO the patient.
@@ -56,6 +57,7 @@ def save_outbound(
         channel=channel,
         content=content,
         message_type=message_type,
+        author_name=author_name,
         triage_level=None,
         source_lang=source_lang,
     )

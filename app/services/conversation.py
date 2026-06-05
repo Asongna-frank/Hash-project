@@ -99,7 +99,12 @@ def _fetch_history(patient_id, db: Session) -> str:
 
     lines = []
     for msg in messages:
-        speaker = "Patient" if msg.direction == "in" else "Bot"
+        if msg.direction == "in":
+            speaker = "Patient"
+        elif getattr(msg, "message_type", "") == "clinician":
+            speaker = f"Clinician ({msg.author_name})" if getattr(msg, "author_name", None) else "Clinician"
+        else:
+            speaker = "Bot"
         lines.append(f"{speaker}: {msg.content}")
 
     return "\n".join(lines)

@@ -108,6 +108,22 @@ def receive_message(
     """
     patient = _get_patient(patient_id, db)
 
+    # Takeover: human clinician is in the chat — store + relay, no bot reply.
+    from app.services.takeover import takeovers
+    _t = takeovers.get(str(patient.id))
+    if _t is not None:
+        result = _process_takeover_message(str(patient.id), body.message, None)
+        relay = result.pop("_relay", None)
+        if relay:
+            from app.services.alert_service import manager as _hm
+            _hm.broadcast_threadsafe(_t.hospital_id, relay)
+        return ChatMessageResponse(
+            reply="",  # no bot reply — the clinician will answer
+            triage_level=result.get("triage_level", "low"),
+            loss_detected=False,
+            is_crisis=False,
+        )
+
     reply = process_message(patient, body.message, channel="app", db=db)
 
     return ChatMessageResponse(
@@ -157,6 +173,7 @@ def _message_to_dict(m: Message) -> dict:
         "direction": m.direction,
         "content": m.content,
         "message_type": m.message_type,
+        "author_name": getattr(m, "author_name", None),
         "triage_level": m.triage_level,
         "is_read": m.is_read,
         "created_at": m.created_at.isoformat() if m.created_at else None,
@@ -166,6 +183,52 @@ def _message_to_dict(m: Message) -> dict:
 # Sync per-frame handlers — each opens its OWN short-lived DB session (a session
 # must never be held open across the lifetime of a long-lived socket) and runs
 # in the threadpool so slow work never blocks the event loop.
+
+def _process_takeover_message(patient_id: str, msg: str, client_msg_id: str | None) -> dict:
+    """
+    Takeover mode: store the message, run RED FLAGS (safety net stays on even
+    with a human in the loop), alert on danger — but generate NO bot reply.
+    The text is relayed to the dashboard by the caller.
+    """
+    db: Session = SessionLocal()
+    try:
+        patient = (
+            db.query(Patient)
+            .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+            .first()
+        )
+        if not patient:
+            return {"_gone": True}
+        flags = match_red_flags(msg)
+        triage = "high" if flags else "low"
+        in_msg = save_inbound(patient.id, msg, triage_level=triage, channel="app",
+                              source_lang=(getattr(patient, "language", None) or "en"))
+        db.add(in_msg)
+        db.commit()
+        db.refresh(in_msg)
+        if flags:
+            try:
+                create_alert(db, patient=patient, source="message_triage",
+                             reason=f"Red-flag during clinician chat: \"{', '.join(flags[:3])}\"",
+                             triage_level="high")
+            except Exception:  # noqa: BLE001
+                logger.exception("Takeover alert failed | patient=%s", patient_id)
+        return {
+            "type": "message_relayed",
+            "client_msg_id": client_msg_id,
+            "triage_level": triage,
+            "_relay": {
+                "type": "patient_message",
+                "patient_id": patient_id,
+                "message_id": str(in_msg.id),
+                "content": msg,
+                "triage_level": triage,
+                "created_at": in_msg.created_at.isoformat() if in_msg.created_at else None,
+            },
+        }
+    finally:
+        db.close()
+
 
 def _process_chat(patient_id: str, msg: str, client_msg_id: str | None) -> dict:
     db: Session = SessionLocal()
@@ -310,6 +373,17 @@ async def chat_websocket(
     patient_manager.register(patient_id, websocket)
 
     try:
+        # Re-signal an active clinician takeover so the banner survives
+        # app restarts / reconnects.
+        from app.services.takeover import takeovers as _takeovers
+        _takeover = _takeovers.get(patient_id)
+        if _takeover is not None:
+            await _ws_send(websocket, {
+                "type": "clinician_joined",
+                "author_name": _takeover.author_name,
+                "hospital_name": _takeover.hospital_name,
+            })
+
         # Re-ring: if the doctor is still calling (she opened the app from the
         # push within the 45s ring window), deliver the incoming_call frame she
         # missed while offline.
@@ -386,9 +460,28 @@ async def chat_websocket(
                 })
                 continue
 
-            # Immediate delivery ack (optimistic UI), then typing indicator
-            # while the brain (LLM + translation) works in the threadpool.
+            # Immediate delivery ack (optimistic UI)
             await _ws_send(websocket, {"type": "ack", "client_msg_id": client_msg_id})
+
+            # Takeover mode: a clinician is in the conversation — no bot reply,
+            # no typing indicator; relay her message to the dashboard instead.
+            from app.services.takeover import takeovers
+            _t = takeovers.get(patient_id)
+            if _t is not None:
+                result = await run_in_threadpool(
+                    _process_takeover_message, patient_id, str(text), client_msg_id
+                )
+                if result.get("_gone"):
+                    await websocket.close(code=WS_NOT_FOUND, reason="Patient not found")
+                    return
+                relay = result.pop("_relay", None)
+                if relay:
+                    from app.services.alert_service import manager as _hm
+                    await _hm.broadcast(_t.hospital_id, relay)
+                await _ws_send(websocket, result)
+                continue
+
+            # Normal mode: typing indicator while the brain works.
             await _ws_send(websocket, {"type": "typing"})
 
             result = await run_in_threadpool(

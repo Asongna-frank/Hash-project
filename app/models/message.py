@@ -27,7 +27,11 @@ class Message(Base):
     # the full text of the message
 
     message_type = Column(String, nullable=False, default="chat")
-    # "chat" | "checkin" | "tip" | "reminder" | "crisis"
+    # "chat" | "checkin" | "tip" | "reminder" | "crisis" | "clinician"
+    # "clinician" = a human from the hospital wrote it (doctor intervention)
+
+    # Display signature for clinician messages (e.g. "Dr Elvira") — null for bot
+    author_name = Column(String, nullable=True)
 
     triage_level = Column(String, nullable=True)
     # null for outbound messages
