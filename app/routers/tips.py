@@ -69,6 +69,26 @@ def get_todays_tip(
         tip = base_query.first()
 
     if tip is None:
+        # First-day patient: she signed up AFTER today's 07:00 UTC job, so no
+        # tip exists yet. Generate her first tip on demand instead of showing
+        # an empty card for up to 24h. Idempotent (send_daily_tip skips if one
+        # already exists) and fail-soft: on any error keep the empty card.
+        from app.models.patient import Patient
+        from app.services.tip_sender import send_daily_tip
+
+        patient = db.query(Patient).filter(Patient.id == patient_id).first()
+        if patient is not None:
+            try:
+                send_daily_tip(patient, db)
+                tip = base_query.filter(Message.created_at >= today_start).first()
+                is_today = tip is not None
+            except Exception:  # noqa: BLE001 — never break the home screen
+                import logging
+                logging.getLogger(__name__).exception(
+                    "On-demand first tip failed | patient=%s", patient_id
+                )
+
+    if tip is None:
         return {"tip": None}
 
     return {

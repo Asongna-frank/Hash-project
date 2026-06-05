@@ -76,8 +76,9 @@ NOW = datetime(2026, 6, 4, 8, 0, 0, tzinfo=timezone.utc)
 # ── Test 9: Cadence mapping from config ──────────────────────────────────────
 
 def test_cadence_high_from_config():
-    assert CHECK_IN_CADENCE_DAYS["high"] == 3
-    assert _RISK_INTERVALS["high"] == timedelta(days=3)
+    # SRS acceptance criteria: high-risk patients are checked on DAILY.
+    assert CHECK_IN_CADENCE_DAYS["high"] == 1
+    assert _RISK_INTERVALS["high"] == timedelta(days=1)
 
 
 def test_cadence_medium_from_config():
@@ -111,7 +112,8 @@ def test_high_risk_due_after_3_days():
 
 @freeze_time(NOW)
 def test_high_risk_not_due_after_2_days():
-    last = NOW - timedelta(days=2)
+    # Daily cadence: 12 hours since the last check-in -> not due yet.
+    last = NOW - timedelta(hours=12)
     patient = _patient(risk_level="high")
     db = _mock_db_last_checkin(last)
     assert _is_checkin_due(patient, db) is False
