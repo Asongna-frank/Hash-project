@@ -21,6 +21,11 @@ def _current_week(patient: Patient) -> int:
     return max(1, min(days // 7, 42))
 
 
+def _lang_name(patient: Patient) -> str:
+    lang = (getattr(patient, "language", None) or "en").lower()
+    return {"en": "English", "fr": "French", "pt": "Portuguese"}.get(lang, "English")
+
+
 def _build_context(patient: Patient, channel: str) -> str:
     conditions = []
     if patient.has_hypertension:       conditions.append("hypertension")
@@ -45,6 +50,7 @@ def _build_context(patient: Patient, channel: str) -> str:
         f"Number of prior births (parity): {patient.parity}",
         f"Channel: {channel}",
         f"Active conditions / risk factors: {', '.join(conditions) if conditions else 'none flagged'}",
+        f"Write the message in: {_lang_name(patient)}",
     ]
     if week in _MILESTONE_WEEKS:
         parts.append(

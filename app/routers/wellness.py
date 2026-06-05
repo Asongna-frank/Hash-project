@@ -235,3 +235,79 @@ def upsert_kicks(
     db.commit()
     db.refresh(row)
     return _kick_response(db, patient.id, row)
+
+
+# ── Daily check-in question (Home "How are you feeling?" card) ───────────────
+
+@router.get(
+    "/{patient_id}/checkin/today",
+    summary="Get today's personalized check-in question",
+    description=(
+        "Patient-only view of her current wellness check-in question — "
+        "personalized from her profile (name, gestational week, risk level, "
+        "and all recorded conditions: hypertension, diabetes, prior loss, "
+        "etc.) and written in her language. Resolution: today's check-in if "
+        "the scheduler already sent one; otherwise generated on demand for "
+        "first-day patients (respecting opt-out and the post-loss paced "
+        "cadence); otherwise the most recent past check-in (is_today=false). "
+        "`answered` is true once she has sent any message after it — her "
+        "answer goes through the normal chat (and its triage/alerting)."
+    ),
+)
+def get_todays_checkin(
+    patient_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.models.message import Message
+
+    patient = get_patient_scoped(patient_id, current_user, db)
+    if current_user.get("type") != "patient":
+        raise HTTPException(status_code=403, detail="Patients only")
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def latest_checkin():
+        return (
+            db.query(Message)
+            .filter(Message.patient_id == patient.id,
+                    Message.message_type == "checkin",
+                    Message.direction == "out")
+            .order_by(Message.created_at.desc())
+            .first()
+        )
+
+    row = latest_checkin()
+    if row is None:
+        # First-day patient — generate one now. send_checkin respects
+        # opt-out, pending-loss state, and the post-loss paced cadence,
+        # so this can legitimately produce nothing (card stays hidden).
+        try:
+            from app.services.checkin_sender import send_checkin
+            send_checkin(patient, db)
+            row = latest_checkin()
+        except Exception:  # noqa: BLE001 — never break the home screen
+            logger.exception("On-demand first check-in failed | patient=%s", patient_id)
+
+    if row is None:
+        return {"checkin": None}
+
+    answered = (
+        db.query(Message)
+        .filter(Message.patient_id == patient.id,
+                Message.direction == "in",
+                Message.created_at > row.created_at)
+        .first()
+        is not None
+    )
+    created = row.created_at
+    is_today = created is not None and created >= today_start
+    return {
+        "checkin": {
+            "id": str(row.id),
+            "question": row.content,
+            "created_at": created.isoformat() if created else None,
+            "is_today": is_today,
+            "answered": answered,
+        }
+    }
