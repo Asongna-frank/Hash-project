@@ -1,12 +1,19 @@
 """Shared authentication and chat schemas."""
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
-    """Phone + password login for both hospitals and patients."""
+    """Login for hospitals and patients.
 
-    phone: str = Field(..., examples=["+237679977660"])
+    Patients log in with phone + password. Hospitals may use phone OR email
+    + password (exactly one identifier is required).
+    """
+
+    phone: Optional[str] = Field(default=None, examples=["+237679977660"])
+    email: Optional[str] = Field(default=None, examples=["contact@gh-douala.cm"])
     password: str = Field(..., examples=["StrongPass123!"])
 
     model_config = {

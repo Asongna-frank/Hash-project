@@ -17,6 +17,8 @@ class Hospital(Base):
 
     name = Column(String, nullable=False)
     phone = Column(String, unique=True, nullable=False, index=True)
+    # Optional second login identifier + contact address (SRS: hospital contact info)
+    email = Column(String, unique=True, nullable=True, index=True)
     hashed_password = Column(String, nullable=False)
 
     gps_lat = Column(Float, nullable=True)

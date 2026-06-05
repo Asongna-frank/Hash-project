@@ -19,6 +19,8 @@ class HospitalCreate(BaseModel):
     """Registration payload for a new hospital + its first personnel record."""
     name: str = Field(..., examples=["General Hospital Douala"])
     phone: str = Field(..., examples=["+237233420000"])
+    email: Optional[str] = Field(default=None, examples=["contact@gh-douala.cm"],
+                                 description="Optional — becomes a second login identifier")
     password: str = Field(..., examples=["StrongPass123!"])
     gps_lat: Optional[float] = Field(default=None, examples=[4.0511])
     gps_lng: Optional[float] = Field(default=None, examples=[9.7679])
@@ -88,6 +90,7 @@ class HospitalResponse(BaseModel):
     id: UUID = Field(..., examples=["4f996b23-92d3-4587-857b-038903d4253d"])
     name: str = Field(..., examples=["General Hospital Douala"])
     phone: str = Field(..., examples=["+237233420000"])
+    email: Optional[str] = Field(default=None, examples=["contact@gh-douala.cm"])
     address: str = Field(..., examples=["Boulevard de la Liberté, Akwa, Douala"])
     gps_lat: Optional[float] = Field(default=None, examples=[4.0511])
     gps_lng: Optional[float] = Field(default=None, examples=[9.7679])

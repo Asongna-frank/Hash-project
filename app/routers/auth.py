@@ -61,6 +61,14 @@ def hospital_signup(
             detail="Phone number already registered",
         )
 
+    # Optional email — normalized lowercase, must be unique when provided
+    hospital_email = (hospital_data.email or "").strip().lower() or None
+    if hospital_email and db.query(Hospital).filter(Hospital.email == hospital_email).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
     # Hash password and create hospital record
     try:
         hashed_password = hash_password(hospital_data.password)
@@ -73,6 +81,7 @@ def hospital_signup(
     hospital = Hospital(
         name=hospital_data.name,
         phone=hospital_phone,
+        email=hospital_email,
         hashed_password=hashed_password,
         gps_lat=hospital_data.gps_lat,
         gps_lng=hospital_data.gps_lng,
@@ -103,26 +112,32 @@ def hospital_signup(
     response_model=TokenResponse,
     summary="Hospital login",
     description=(
-        "Authenticates a hospital by phone + password and returns a JWT. Public "
-        "endpoint. The phone is normalized before lookup, so any valid format "
-        "matches. Wrong phone or password returns a generic 401 (never reveals "
-        "whether the phone exists)."
+        "Authenticates a hospital by PHONE or EMAIL + password and returns a "
+        "JWT. Public endpoint. Send either {\"phone\", \"password\"} or "
+        "{\"email\", \"password\"}. The phone is normalized before lookup. "
+        "Wrong credentials return a generic 401 (never reveals which part failed)."
     ),
 )
 def hospital_login(
     login_request: LoginRequest,
     db: Session = Depends(get_db),
 ):
-    """Login endpoint for hospitals. Returns JWT token."""
-    # Normalize the phone to E.164 so any valid input format matches the stored
-    # number. Invalid input falls back to raw → no match → generic 401 (rule 7).
-    try:
-        lookup_phone = normalize_phone(login_request.phone)
-    except ValueError:
-        lookup_phone = login_request.phone
-
-    # Look up hospital by phone in hospitals table only
-    hospital = db.query(Hospital).filter(Hospital.phone == lookup_phone).first()
+    """Login endpoint for hospitals. Accepts phone OR email + password."""
+    hospital = None
+    if login_request.email:
+        hospital = (
+            db.query(Hospital)
+            .filter(Hospital.email == login_request.email.strip().lower())
+            .first()
+        )
+    elif login_request.phone:
+        # Normalize the phone to E.164 so any valid input format matches the
+        # stored number. Invalid input falls back to raw → no match → 401.
+        try:
+            lookup_phone = normalize_phone(login_request.phone)
+        except ValueError:
+            lookup_phone = login_request.phone
+        hospital = db.query(Hospital).filter(Hospital.phone == lookup_phone).first()
 
     # Verify password (generic error message for security)
     if not hospital or not verify_password(login_request.password, hospital.hashed_password):
@@ -207,6 +222,11 @@ def patient_login(
     db: Session = Depends(get_db),
 ):
     """Login endpoint for patients. Returns JWT token."""
+    if not login_request.phone:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid phone number or password",
+        )
     # Normalize the phone to E.164 so any valid input format matches the stored
     # number. Invalid input falls back to raw → no match → generic 401 (rule 7).
     try:
