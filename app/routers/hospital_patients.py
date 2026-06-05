@@ -427,3 +427,106 @@ def post_loss_case_view(
         },
         "notes": case.notes,
     }
+
+
+# ── Clinician notes (SRS M8: per-patient note form) ───────────────────────────
+
+class NoteCreate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000,
+                      examples=["Called her about the headache alert — BP normal at clinic, advised rest, follow-up Friday."])
+    author_name: Optional[str] = Field(default=None, max_length=120, examples=["Dr Elvira"])
+
+    model_config = ConfigDict(json_schema_extra={"examples": [{
+        "text": "Called her about the headache alert — advised rest, follow-up Friday.",
+        "author_name": "Dr Elvira",
+    }]})
+
+
+def _note_to_dict(n) -> dict:
+    return {
+        "id": str(n.id),
+        "text": n.text,
+        "author_name": n.author_name,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+@router.post(
+    "/{patient_id}/notes",
+    status_code=201,
+    summary="Add a clinician note",
+    description=(
+        "Hospital-only, own patients only (others → 404). Adds a dated note to "
+        "the patient's record (audited). author_name is a display signature "
+        "(personnel have no individual logins). Notes are append-only — no "
+        "edit/delete, so the clinical record cannot be silently rewritten."
+    ),
+)
+def add_patient_note(
+    patient_id: UUID,
+    body: NoteCreate,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from app.models.patient_note import PatientNote
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    note = PatientNote(
+        patient_id=patient.id,
+        hospital_id=patient.hospital_id,
+        text=body.text.strip(),
+        author_name=(body.author_name or "").strip() or None,
+    )
+    db.add(note)
+    write_audit(
+        db, actor_type="hospital", actor_id=caller_hospital_id,
+        action="patient.note.create", target_type="patient", target_id=patient.id,
+        details={"author_name": note.author_name},
+    )
+    db.commit()
+    db.refresh(note)
+    return _note_to_dict(note)
+
+
+@router.get(
+    "/{patient_id}/notes",
+    summary="List clinician notes",
+    description=(
+        "Hospital-only, own patients only (others → 404). Newest first, "
+        "paginated (?skip=&limit=, max 100)."
+    ),
+)
+def list_patient_notes(
+    patient_id: UUID,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    caller_hospital_id: str = Depends(require_hospital),
+):
+    from app.models.patient_note import PatientNote
+
+    patient = (
+        db.query(Patient)
+        .filter(Patient.id == patient_id, Patient.is_active.is_(True))
+        .first()
+    )
+    if not patient or str(patient.hospital_id) != caller_hospital_id:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    limit = min(max(limit, 1), 100)
+    q = (
+        db.query(PatientNote)
+        .filter(PatientNote.patient_id == patient.id)
+        .order_by(PatientNote.created_at.desc())
+    )
+    total = q.count()
+    rows = q.offset(skip).limit(limit).all()
+    return {"total": total, "has_more": skip + len(rows) < total,
+            "items": [_note_to_dict(n) for n in rows]}

@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from datetime import date
@@ -44,6 +44,12 @@ router = APIRouter()
     ),
 )
 def list_patients(
+    search: str | None = Query(default=None, max_length=100,
+                               description="case-insensitive match on name or phone"),
+    risk: str | None = Query(default=None, pattern="^(low|medium|high)$"),
+    track: str | None = Query(default=None, pattern="^(smartphone|choronko)$"),
+    status: str | None = Query(default=None, pattern="^(active|post_loss|delivered)$"),
+    missed: bool | None = Query(default=None, description="true = only flagged for missed check-ins"),
     db: Session = Depends(get_db),
     caller_id: str = Depends(require_hospital),
 ):
@@ -52,11 +58,22 @@ def list_patients(
     Each row includes: name, phone, age, status, current gestational age in weeks.
     Patients cannot call this endpoint (require_hospital raises 403).
     """
-    patients = (
-        db.query(Patient)
-        .filter(Patient.hospital_id == caller_id, Patient.is_active.is_(True))
-        .all()
+    query = db.query(Patient).filter(
+        Patient.hospital_id == caller_id, Patient.is_active.is_(True)
     )
+    if search and search.strip():
+        from sqlalchemy import or_
+        term = f"%{search.strip()}%"
+        query = query.filter(or_(Patient.name.ilike(term), Patient.phone.ilike(term)))
+    if risk:
+        query = query.filter(Patient.risk_level == risk)
+    if track:
+        query = query.filter(Patient.account_type == track)
+    if status:
+        query = query.filter(Patient.status == status)
+    if missed is not None:
+        query = query.filter(Patient.missed_checkin_flag.is_(missed))
+    patients = query.all()
 
     # Latest message per patient (either direction) in ONE grouped query —
     # powers the dashboard's "sort by last activity".
