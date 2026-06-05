@@ -59,9 +59,31 @@ def _build_context(patient: Patient, channel: str) -> str:
     return "\n".join(parts)
 
 
-def generate_checkin(patient: Patient) -> str:
+def _recent_checkins(patient_id, db) -> str:
+    """Last few check-in questions, so the model never repeats itself."""
+    from app.models.message import Message
+
+    rows = (
+        db.query(Message)
+        .filter(Message.patient_id == patient_id,
+                Message.message_type == "checkin",
+                Message.direction == "out")
+        .order_by(Message.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    if not rows:
+        return "None yet — this is the first check-in."
+    return "\n".join(f"- {r.content}" for r in rows)
+
+
+def generate_checkin(patient: Patient, db=None) -> str:
     """Return a personalized check-in string ready to deliver to this patient."""
     channel = "sms" if patient.account_type == "choronko" else "app"
+
+    history = ""
+    if db is not None:
+        history = f"\n\nYour previous check-in questions (do NOT repeat these angles):\n{_recent_checkins(patient.id, db)}"
 
     if patient.status == "post_loss":
         system_prompt = POST_LOSS_CHECKIN_SYSTEM_PROMPT
@@ -69,11 +91,12 @@ def generate_checkin(patient: Patient) -> str:
             f"Patient name: {patient.name}\n"
             f"Channel: {channel}\n"
             "Situation: this patient has recently experienced a pregnancy loss."
+            + history
         )
         max_tokens = 80 if channel == "sms" else 200
     else:
         system_prompt = CHECKIN_SYSTEM_PROMPT
-        context = _build_context(patient, channel)
+        context = _build_context(patient, channel) + history
         max_tokens = 60 if channel == "sms" else 250
 
     msg = llm_service.classify_message(

@@ -272,7 +272,7 @@ def send_checkin(patient: Patient, db: Session) -> bool:
         lang = (getattr(patient, "language", None) or "en").lower()
         checkin_text = get_content("phq2_check", lang)
     else:
-        checkin_text = generate_checkin(patient)
+        checkin_text = generate_checkin(patient, db)
 
     if patient.account_type == "choronko":
         result = sms_service.send_sms(to=patient.phone, message=checkin_text)
