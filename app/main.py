@@ -13,10 +13,12 @@ from app.routers import hospital_patients
 from app.routers import sms as sms_router
 from app.routers import alerts as alerts_router
 from app.routers import wellness as wellness_router
+from app.routers import avatar as avatar_router
 from app.models import message  # noqa — ensures table is registered with Base
 from app.models import alert as alert_model  # noqa — registers alerts table
 from app.models import wellness as wellness_model  # noqa — registers daily_wellness table
 from app.models import post_loss_case as post_loss_case_model  # noqa — registers post_loss_cases table
+from app.models import kicks as kicks_model  # noqa — registers kick_counts table
 from app.models import appointment as appointment_model  # noqa — registers appointments table
 from app.models import personnel as personnel_model    # noqa — registers personnel table
 from app.models import audit_log as audit_log_model    # noqa — registers audit_logs table
@@ -89,3 +91,4 @@ app.include_router(personnel_router.router)
 app.include_router(sms_router.router,    prefix="/sms",                   tags=["sms"])
 app.include_router(alerts_router.router, prefix="/alerts",                tags=["alerts"])
 app.include_router(wellness_router.router, prefix="/patients",              tags=["wellness"])
+app.include_router(avatar_router.router, prefix="/patients",               tags=["patients"])

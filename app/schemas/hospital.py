@@ -58,9 +58,13 @@ class HospitalUpdate(BaseModel):
 
 
 class HospitalPublic(BaseModel):
-    """Public-facing minimal view — safe for unauthenticated callers."""
+    """Public-facing minimal view — safe for unauthenticated callers.
+    `phone` is included so the patient app can offer one-tap "Call my
+    hospital" (hospitals are public institutions; password still protects
+    the account)."""
     id: UUID = Field(..., examples=["4f996b23-92d3-4587-857b-038903d4253d"])
     name: str = Field(..., examples=["General Hospital Douala"])
+    phone: str = Field(..., examples=["+237677111222"])
     address: str = Field(..., examples=["Boulevard de la Liberté, Akwa, Douala"])
     gps_lat: Optional[float] = Field(default=None, examples=[4.0511])
     gps_lng: Optional[float] = Field(default=None, examples=[9.7679])

@@ -119,3 +119,119 @@ def upsert_wellness(
     db.commit()
     db.refresh(row)
     return row
+
+
+# ── Kick counter (fetal movement, third trimester) ───────────────────────────
+
+class KickUpdate(BaseModel):
+    """Set today's movement count (the app sends the running total)."""
+    count: int = Field(..., ge=0, le=500, examples=[10])
+    duration_minutes: Optional[int] = Field(default=None, ge=1, le=720, examples=[45])
+
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [{"count": 10, "duration_minutes": 45}]
+    })
+
+
+class KickDay(BaseModel):
+    date: date_type = Field(..., examples=["2026-06-05"])
+    count: int = Field(..., examples=[10])
+    duration_minutes: Optional[int] = Field(default=None, examples=[45])
+    updated_at: Optional[datetime] = Field(default=None)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class KickResponse(BaseModel):
+    today: KickDay
+    history: list[KickDay] = Field(
+        default_factory=list,
+        description="Last 7 days (today excluded), newest first — for the mini graph.",
+    )
+
+
+def _kick_response(db: Session, patient_id, today_row) -> "KickResponse":
+    from datetime import timedelta
+    from app.models.kicks import KickCount
+
+    today = _today()
+    history = (
+        db.query(KickCount)
+        .filter(
+            KickCount.patient_id == patient_id,
+            KickCount.date < today,
+            KickCount.date >= today - timedelta(days=7),
+        )
+        .order_by(KickCount.date.desc())
+        .all()
+    )
+    today_day = (KickDay.model_validate(today_row) if today_row
+                 else KickDay(date=today, count=0))
+    return KickResponse(today=today_day, history=[KickDay.model_validate(r) for r in history])
+
+
+@router.get(
+    "/{patient_id}/kicks",
+    response_model=KickResponse,
+    summary="Get today's kick count (+ 7-day history)",
+    description=(
+        "Returns today's fetal-movement count (0 if none yet — the card always "
+        "renders) plus the last 7 days for a mini graph. A patient reads only "
+        "her own; a hospital its own patients (else 404)."
+    ),
+)
+def get_kicks(
+    patient_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.models.kicks import KickCount
+
+    patient = get_patient_scoped(patient_id, current_user, db)
+    row = (
+        db.query(KickCount)
+        .filter(KickCount.patient_id == patient.id, KickCount.date == _today())
+        .first()
+    )
+    return _kick_response(db, patient.id, row)
+
+
+@router.post(
+    "/{patient_id}/kicks",
+    response_model=KickResponse,
+    summary="Update today's kick count",
+    description=(
+        "Patient-only, own record only. The app sends the RUNNING TOTAL for "
+        "today (upsert) — e.g. tap the kick button → POST {\"count\": 7}. "
+        "Clinical note for the frontend: if the patient reports concern about "
+        "reduced movement, pre-fill a chat message ('My baby is not moving "
+        "much today') — the chat red-flag layer takes over from there."
+    ),
+)
+def upsert_kicks(
+    patient_id: UUID,
+    body: KickUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    from app.models.kicks import KickCount
+
+    patient = get_patient_scoped(patient_id, current_user, db)
+    if current_user.get("type") != "patient":
+        raise HTTPException(status_code=403, detail="Patients only")
+
+    today = _today()
+    row = (
+        db.query(KickCount)
+        .filter(KickCount.patient_id == patient.id, KickCount.date == today)
+        .first()
+    )
+    if row is None:
+        row = KickCount(patient_id=patient.id, date=today)
+        db.add(row)
+    row.count = body.count
+    if body.duration_minutes is not None:
+        row.duration_minutes = body.duration_minutes
+    db.commit()
+    db.refresh(row)
+    return _kick_response(db, patient.id, row)
