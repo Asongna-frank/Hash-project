@@ -8,7 +8,7 @@ Transports only — alert creation/fan-out logic lives in alert_service.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -88,26 +88,65 @@ def emergency_button(
 
 @router.get(
     "",
-    response_model=list[AlertResponse],
-    summary="List the hospital's alerts",
+    summary="List the hospital's alerts (filterable)",
     description=(
-        "Hospital-only. Newest first. Filter with ?status=new|ack|resolved. "
-        "Each alert embeds a patient summary (name, phone, risk level, track) "
-        "so the dashboard pane renders without extra lookups."
+        "Hospital-only. Newest first, paginated. Filters combine with AND:\n"
+        "- ?status=new|ack|resolved\n"
+        "- ?source=message_triage|emergency_button|missed_checkins|post_loss_crisis\n"
+        "- ?priority=critical|normal (critical = high triage or emergency button)\n"
+        "- ?patient_id=<uuid> (one patient's alert history)\n"
+        "- ?since=2026-06-01&until=2026-06-05 (created_at date range, inclusive)\n"
+        "- ?q=bleeding (case-insensitive search in the reason text)\n"
+        "Response: {total, has_more, items} — total counts ALL matches so the "
+        "UI can show tab counts; items embeds the patient summary."
     ),
 )
 def list_alerts(
     status: str | None = Query(default=None, pattern="^(new|ack|resolved)$"),
+    source: str | None = Query(
+        default=None,
+        pattern="^(message_triage|emergency_button|missed_checkins|post_loss_crisis)$",
+    ),
+    priority: str | None = Query(default=None, pattern="^(critical|normal)$"),
+    patient_id: UUID | None = Query(default=None),
+    since: date | None = Query(default=None, description="created on/after (YYYY-MM-DD)"),
+    until: date | None = Query(default=None, description="created on/before (YYYY-MM-DD)"),
+    q: str | None = Query(default=None, max_length=100, description="search in reason"),
     skip: int = 0,
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_db),
     hospital_id: str = Depends(require_hospital),
 ):
-    q = db.query(Alert).filter(Alert.hospital_id == hospital_id)
+    from datetime import timedelta
+    from sqlalchemy import and_, or_
+
+    query = db.query(Alert).filter(Alert.hospital_id == hospital_id)
     if status:
-        q = q.filter(Alert.status == status)
-    alerts = q.order_by(Alert.created_at.desc()).offset(skip).limit(limit).all()
-    return [_alert_with_patient(a, db) for a in alerts]
+        query = query.filter(Alert.status == status)
+    if source:
+        query = query.filter(Alert.source == source)
+    if priority == "critical":
+        query = query.filter(or_(Alert.triage_level == "high",
+                                 Alert.source == "emergency_button"))
+    elif priority == "normal":
+        query = query.filter(and_(Alert.triage_level != "high",
+                                  Alert.source != "emergency_button"))
+    if patient_id:
+        query = query.filter(Alert.patient_id == patient_id)
+    if since:
+        query = query.filter(Alert.created_at >= since)
+    if until:
+        query = query.filter(Alert.created_at < until + timedelta(days=1))
+    if q and q.strip():
+        query = query.filter(Alert.reason.ilike(f"%{q.strip()}%"))
+
+    total = query.count()
+    alerts = query.order_by(Alert.created_at.desc()).offset(skip).limit(limit).all()
+    return {
+        "total": total,
+        "has_more": skip + len(alerts) < total,
+        "items": [_alert_with_patient(a, db) for a in alerts],
+    }
 
 
 @router.patch(
