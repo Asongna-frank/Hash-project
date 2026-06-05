@@ -116,10 +116,33 @@ async def start_call(
 def ice_config(current_user: dict = Depends(get_current_user)):
     ice: list[dict] = [{"urls": ["stun:stun.l.google.com:19302",
                                  "stun:stun1.l.google.com:19302"]}]
-    if settings.TURN_URL:
+
+    if settings.TURN_SECRET and settings.TURN_HOST:
+        # Time-limited HMAC credentials (TURN REST API convention) — valid 6h,
+        # derived from the shared secret; nothing static leaks to clients.
+        import base64
+        import hashlib
+        import hmac
+        import time
+
+        username = str(int(time.time()) + 6 * 3600)
+        credential = base64.b64encode(
+            hmac.new(settings.TURN_SECRET.encode(), username.encode(),
+                     hashlib.sha1).digest()
+        ).decode()
+        ice.append({
+            "urls": [
+                f"turn:{settings.TURN_HOST}:3478?transport=udp",
+                f"turn:{settings.TURN_HOST}:3478?transport=tcp",
+            ],
+            "username": username,
+            "credential": credential,
+        })
+    elif settings.TURN_URL:
         entry: dict = {"urls": [settings.TURN_URL]}
         if settings.TURN_USERNAME:
             entry["username"] = settings.TURN_USERNAME
             entry["credential"] = settings.TURN_CREDENTIAL
         ice.append(entry)
+
     return {"iceServers": ice}

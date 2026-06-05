@@ -24,8 +24,12 @@ class Settings(BaseSettings):
     OPENAI_REALTIME_MODEL: str = "gpt-realtime"
     OPENAI_REALTIME_VOICE: str = "marin"
 
-    # Optional TURN relay for doctor->patient WebRTC calls (recommended for
-    # reliability across mobile networks; STUN-only works on most home/office NATs).
+    # TURN relay for doctor->patient WebRTC calls — coturn on this VPS.
+    # TURN_SECRET must match static-auth-secret in /etc/turnserver.conf;
+    # ice-config mints time-limited HMAC credentials from it (RFC TURN REST).
+    TURN_HOST: str = ""    # e.g. 81.17.100.244
+    TURN_SECRET: str = ""
+    # Legacy static-credential fallback (unused when TURN_SECRET is set)
     TURN_URL: str = ""
     TURN_USERNAME: str = ""
     TURN_CREDENTIAL: str = ""
