@@ -144,7 +144,7 @@ def send_all_daily_tips() -> None:
 
 scheduler.add_job(
     send_all_daily_tips,
-    trigger=CronTrigger(hour=7, minute=0, timezone="UTC"),
+    trigger=CronTrigger(hour=10, minute=30, timezone="UTC"),
     id="daily_tips",
     replace_existing=True,
 )
