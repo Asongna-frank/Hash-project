@@ -8,7 +8,9 @@ system-computed):
   alarm_2  — fires AT reminder_datetime
 
 Channel routing (hard rule 17):
-  choronko   → Twilio SMS, SMS-safe short form; also logged to messages table
+  choronko   → SMS via the configured provider (sms_service — Africa's Talking
+               when SMS_PROVIDER=africastalking, else Twilio), SMS-safe short
+               form; also logged to messages table
   smartphone → in-app message (channel="app", message_type="reminder", is_read=False)
                which the notification bell polls
 

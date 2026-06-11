@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     TURN_USERNAME: str = ""
     TURN_CREDENTIAL: str = ""
 
+    # SMS provider selector: "twilio" | "africastalking".
+    # Controls which adapter get_sms_service() / get_inbound_sms_parser() return.
+    # Twilio = outbound only (cannot do two-way SMS in Cameroon).
+    # Africa's Talking = two-way for Cameroon via a registered shortcode.
+    SMS_PROVIDER: str = "twilio"
+
     # Twilio SMS (choronko track).
     # Add these to .env:
     #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -45,6 +51,19 @@ class Settings(BaseSettings):
     # Exact public URL Twilio calls for inbound SMS — required for signature
     # validation. When set (with the auth token), two-way SMS is live.
     TWILIO_INBOUND_WEBHOOK_URL: str = ""
+
+    # Africa's Talking SMS — two-way (send + receive) for Cameroon.
+    # Set SMS_PROVIDER=africastalking to activate. Add to .env:
+    #   AFRICASTALKING_USERNAME=sandbox     (literal "sandbox" for the sandbox
+    #                                        app; your app username in production)
+    #   AFRICASTALKING_API_KEY=...          (dashboard → app → Settings → API Key)
+    #   AFRICASTALKING_SHORTCODE=...        (your registered shortcode; used as the
+    #                                        sender. Optional in sandbox.)
+    # When username == "sandbox" the adapter automatically targets the sandbox
+    # API host; any other username targets production.
+    AFRICASTALKING_USERNAME: str = ""
+    AFRICASTALKING_API_KEY: str = ""
+    AFRICASTALKING_SHORTCODE: str = ""
 
     # OneSignal push (smartphone track).
     # Add these to .env:

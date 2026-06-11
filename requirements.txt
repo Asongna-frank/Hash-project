@@ -1,9 +1,11 @@
-# HASH Backend — direct runtime dependencies only.
-# Transitive packages are resolved automatically by pip on install.
+# HASH Backend — direct dependencies, pinned to the working venv.
+# Transitive packages (starlette, anyio, certifi, rsa, ecdsa, tzlocal, etc.)
+# are resolved automatically by pip on install.
 
 # --- Web framework / ASGI server ---
 fastapi==0.136.1
-uvicorn==0.47.0
+uvicorn[standard]==0.47.0   # [standard] pulls watchfiles (--reload), uvloop, httptools, websockets
+python-multipart==0.0.29    # multipart/form parsing — file uploads (avatar, voice, image) + form webhooks
 
 # --- Database (PostgreSQL via Supabase) ---
 SQLAlchemy==2.0.49
@@ -15,16 +17,24 @@ pydantic-settings==2.14.1
 python-dotenv==1.2.2
 
 # --- Auth (JWT + password hashing) ---
-python-jose==3.5.0
+python-jose==3.5.0     # imported as `jose` for JWT encode/decode
 passlib==1.7.4
-bcrypt==4.0.1
+bcrypt==4.0.1          # passlib's bcrypt backend
 
 # --- External services ---
-groq==1.4.0            # LLM provider (local dev)
-httpx==0.28.1          # HTTP client (groq transport)
-twilio                 # SMS provider (choronko track)
-APScheduler==3.11.2    # appointment reminder scheduler
-phonenumbers           # E.164 phone normalization/validation
+groq==1.4.0            # LLM provider (local dev) — lazy-imported in llm_service
+httpx==0.28.1          # HTTP client: groq transport + OneSignal push_service
+twilio==9.10.9         # outbound SMS (choronko track) — lazy-imported in sms_service
+phonenumbers==9.0.31   # E.164 phone normalization/validation
+APScheduler==3.11.2    # background scheduler (reminders, tips, check-ins)
+Pillow==12.2.0         # image processing — patient avatar router (resize/orient/JPEG)
+
+# --- External services: production only ---
+# Uncomment when LLM_PROVIDER=bedrock (lazy-imported in llm_service.BedrockLLMService):
+# boto3
 
 # --- Testing ---
-freezegun              # deterministic datetime in tests
+pytest==9.0.3
+pytest-asyncio==1.3.0  # asyncio test mode (configured active in this project)
+pytest-cov==7.1.0      # coverage plugin (loaded by the test session)
+freezegun==1.5.5       # deterministic datetime in tests

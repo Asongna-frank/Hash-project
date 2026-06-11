@@ -1,9 +1,15 @@
 # app/services/sms_service.py
 """
-SMS provider abstraction — Twilio implementation.
+SMS provider abstraction — Twilio + Africa's Talking implementations.
 
-All SMS sends go through the module-level `sms_service` singleton.
-Never import twilio.rest.Client directly from a router or business-logic file.
+The active outbound provider is chosen by settings.SMS_PROVIDER:
+  "africastalking" → AfricasTalkingSMSService (two-way for Cameroon; ACTIVE)
+  "twilio"         → TwilioSMSService (outbound only; kept for fallback/other markets)
+
+All SMS sends go through the module-level `sms_service` singleton — so flipping
+SMS_PROVIDER switches every caller (chat replies, tips, check-ins, appointment
+reminders, post-loss, hospital alerts) at once. Never import a provider client
+(twilio.rest.Client, etc.) directly from a router or business-logic file.
 
 TRIAL-ACCOUNT NOTE (leave for operators):
   Twilio trial accounts can only send to numbers verified in the Twilio Console
@@ -77,7 +83,75 @@ class TwilioSMSService(BaseSMSService):
             return SMSResult(ok=False, error=f"{code}: {detail}" if code else detail)
 
 
+class AfricasTalkingSMSService(BaseSMSService):
+    """
+    Send SMS via Africa's Talking — the two-way provider for Cameroon.
+
+    `to` must be E.164 (e.g. +2376xxxxxxxx). The sender is the registered
+    shortcode (settings.AFRICASTALKING_SHORTCODE); in the sandbox it may be
+    omitted, in which case AT delivers only to the Sandbox simulator.
+
+    Called directly over httpx (no SDK dependency), mirroring the project's
+    OpenAI / OneSignal integrations.
+    """
+
+    def __init__(self) -> None:
+        self._username = settings.AFRICASTALKING_USERNAME
+        self._api_key = settings.AFRICASTALKING_API_KEY
+        self._sender = settings.AFRICASTALKING_SHORTCODE or None
+        # Sandbox uses the literal username "sandbox" and a separate API host.
+        base = (
+            "https://api.sandbox.africastalking.com"
+            if self._username == "sandbox"
+            else "https://api.africastalking.com"
+        )
+        self._url = f"{base}/version1/messaging"
+
+    def send_sms(self, to: str, message: str) -> SMSResult:
+        if not self._username or not self._api_key:
+            logger.error("Africa's Talking SMS not configured — cannot send to %s", to)
+            return SMSResult(ok=False, error="Africa's Talking not configured")
+
+        data = {"username": self._username, "to": to, "message": message}
+        if self._sender:
+            data["from"] = self._sender
+        headers = {
+            "apiKey": self._api_key,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+
+        try:
+            import httpx
+
+            resp = httpx.post(self._url, data=data, headers=headers, timeout=15.0)
+            resp.raise_for_status()
+            body = resp.json()
+            recipients = body.get("SMSMessageData", {}).get("Recipients", [])
+            if recipients:
+                r0 = recipients[0]
+                # AT success codes: 100 Processed, 101 Sent, 102 Queued.
+                if r0.get("status") == "Success" or str(r0.get("statusCode")) in ("100", "101", "102"):
+                    logger.info(
+                        "AfricasTalking SMS sent | to=%s | id=%s | status=%s",
+                        to, r0.get("messageId"), r0.get("status"),
+                    )
+                    return SMSResult(ok=True, provider_message_id=r0.get("messageId"))
+                return SMSResult(ok=False, error=f"{r0.get('statusCode')}: {r0.get('status')}")
+
+            # No recipients usually means an invalid/unregistered sender or number.
+            detail = body.get("SMSMessageData", {}).get("Message", "no recipients accepted")
+            logger.error("AfricasTalking SMS rejected | to=%s | %s", to, detail)
+            return SMSResult(ok=False, error=detail)
+        except Exception as exc:  # noqa: BLE001 — network/HTTP/JSON errors
+            detail = str(exc)
+            logger.error("AfricasTalking SMS failed | to=%s | %s", to, detail)
+            return SMSResult(ok=False, error=detail)
+
+
 def get_sms_service() -> BaseSMSService:
+    if settings.SMS_PROVIDER == "africastalking":
+        return AfricasTalkingSMSService()
     return TwilioSMSService()
 
 
@@ -85,11 +159,11 @@ sms_service: BaseSMSService = get_sms_service()  # import this everywhere
 
 
 # ── INBOUND SMS (two-way) ─────────────────────────────────────────────────────
-# Twilio cannot do two-way SMS in Cameroon, so the inbound provider is UNDECIDED.
-# The SMS layer is therefore two-directional and provider-split: outbound stays
-# Twilio (above); inbound is a separate, provider-neutral abstraction so the
-# eventual receive provider (e.g. Africa's Talking) can differ from the send one.
-# Only the concrete parser is stubbed — the abstraction and webhook flow are real.
+# Twilio cannot do two-way SMS in Cameroon, so receiving is handled by a separate,
+# provider-neutral abstraction. Africa's Talking is the chosen two-way provider
+# (send + receive via a registered shortcode); set SMS_PROVIDER=africastalking to
+# route both directions through it. The Twilio inbound parser remains available
+# for environments where a Twilio number is used.
 
 @dataclass
 class InboundSMS:
@@ -144,13 +218,49 @@ class TwilioInboundSMSParser(BaseInboundSMSParser):
         )
 
 
+class AfricasTalkingInboundSMSParser(BaseInboundSMSParser):
+    """
+    Inbound SMS via an Africa's Talking shortcode "Incoming Messages" callback.
+
+    AT POSTs application/x-www-form-urlencoded fields: from, to, text, id,
+    linkId, date. There is NO request signature, so authenticity cannot be
+    cryptographically verified here. Two production hardening options (out of
+    scope for the sandbox): (1) register the callback on a secret, unguessable
+    path, and/or (2) IP-allowlist Africa's Talking's egress ranges at the proxy.
+
+    `id` is AT's unique message id and feeds the webhook's idempotency guard.
+    """
+
+    def __init__(self) -> None:
+        # Optional: the shortcode we expect in the `to` field. When set, messages
+        # addressed to a different shortcode are rejected.
+        self._expected_shortcode = settings.AFRICASTALKING_SHORTCODE or None
+
+    def verify_and_parse(self, request_headers: dict, raw_body: bytes) -> InboundSMS:
+        from urllib.parse import parse_qsl
+
+        params = dict(parse_qsl(raw_body.decode("utf-8"), keep_blank_values=True))
+
+        from_phone = params.get("from", "")
+        text = params.get("text", "")
+        if not from_phone or not text.strip():
+            raise ValueError("Missing from/text in Africa's Talking payload")
+
+        if self._expected_shortcode and params.get("to") and params["to"] != self._expected_shortcode:
+            raise ValueError("Inbound SMS addressed to an unexpected shortcode")
+
+        return InboundSMS(
+            from_phone=from_phone,
+            text=text,
+            provider_message_id=params.get("id"),
+        )
+
+
 class StubInboundSMSParser(BaseInboundSMSParser):
     """
-    Placeholder until the inbound SMS provider is chosen. Everything around it
-    (webhook endpoint, patient lookup, idempotency, brain dispatch, reply send)
-    is built and tested — only this adapter is missing. Provider-specific details
-    still to wire: signature header name, payload field names, and the
-    receiving number/shortcode.
+    Placeholder used only when no inbound provider is configured. Everything
+    around it (webhook endpoint, patient lookup, idempotency, brain dispatch,
+    reply send) is built and tested — selecting a provider activates the channel.
     """
 
     def verify_and_parse(self, request_headers: dict, raw_body: bytes) -> InboundSMS:
@@ -158,6 +268,8 @@ class StubInboundSMSParser(BaseInboundSMSParser):
 
 
 def get_inbound_sms_parser() -> BaseInboundSMSParser:
+    if settings.SMS_PROVIDER == "africastalking":
+        return AfricasTalkingInboundSMSParser()
     if settings.TWILIO_AUTH_TOKEN and settings.TWILIO_INBOUND_WEBHOOK_URL:
         return TwilioInboundSMSParser()
     return StubInboundSMSParser()
